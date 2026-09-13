@@ -60,6 +60,7 @@ type RasterStateRecord = {
   stretch: "linear" | "log" | "sqrt";
   gamma: number;
   viewportStretchAuto?: boolean;
+  viewportStretchMethod?: ViewportStretchMethod;
 };
 
 const CLASSIFICATION_METHODS: {
@@ -123,6 +124,10 @@ function readRasterState(layer: GeoLibreLayer): RasterStateRecord {
     stretch: raw.stretch === "log" || raw.stretch === "sqrt" ? raw.stretch : "linear",
     gamma: typeof raw.gamma === "number" && raw.gamma > 0 ? raw.gamma : 1,
     viewportStretchAuto: raw.viewportStretchAuto === true,
+    viewportStretchMethod:
+      raw.viewportStretchMethod === "percentile" || raw.viewportStretchMethod === "stddev"
+        ? raw.viewportStretchMethod
+        : "minmax",
   };
 }
 
@@ -809,6 +814,8 @@ export function RasterSymbologySection({
           mapControllerRef={mapControllerRef}
           autoUpdateInitial={state.viewportStretchAuto === true}
           onAutoUpdate={(enabled) => commit({ statePatch: { viewportStretchAuto: enabled } })}
+          methodInitial={state.viewportStretchMethod ?? "minmax"}
+          onMethod={(method) => commit({ statePatch: { viewportStretchMethod: method } })}
           onChange={(rescale) => commit({ statePatch: { rescale } })}
         />
       )}
@@ -1177,6 +1184,8 @@ function ViewportStretchControls({
   mapControllerRef,
   autoUpdateInitial,
   onAutoUpdate,
+  methodInitial,
+  onMethod,
   onChange,
 }: {
   layerId: string;
@@ -1184,10 +1193,12 @@ function ViewportStretchControls({
   mapControllerRef?: RefObject<MapEngine | null>;
   autoUpdateInitial: boolean;
   onAutoUpdate: (enabled: boolean) => void;
+  methodInitial: ViewportStretchMethod;
+  onMethod: (method: ViewportStretchMethod) => void;
   onChange: (rescale: [number, number][] | null) => void;
 }) {
   const { t } = useTranslation();
-  const [method, setMethod] = useState<ViewportStretchMethod>("minmax");
+  const [method, setMethod] = useState<ViewportStretchMethod>(methodInitial);
   const [autoUpdate, setAutoUpdate] = useState(autoUpdateInitial);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -1205,6 +1216,10 @@ function ViewportStretchControls({
   useEffect(() => {
     setAutoUpdate(autoUpdateInitial);
   }, [autoUpdateInitial]);
+
+  useEffect(() => {
+    setMethod(methodInitial);
+  }, [methodInitial]);
 
   const apply = useCallback(
     async (silent = false): Promise<void> => {
@@ -1270,18 +1285,6 @@ function ViewportStretchControls({
     [band, layerId, method],
   );
 
-  useEffect(() => {
-    if (!autoUpdate || !mapControllerRef?.current) return;
-    const stop = mapControllerRef.current.onCameraIdle(() => {
-      void apply(true);
-    });
-    void apply(true);
-    return () => {
-      stop();
-      abortRef.current?.abort();
-    };
-  }, [apply, autoUpdate, mapControllerRef]);
-
   return (
     <div className="mt-3 space-y-2 border-t pt-3">
       <Label htmlFor="rasterViewportStretch">{t("rasterSymbology.viewportStretch")}</Label>
@@ -1289,7 +1292,11 @@ function ViewportStretchControls({
         <Select
           id="rasterViewportStretch"
           value={method}
-          onChange={(event) => setMethod(event.target.value as ViewportStretchMethod)}
+          onChange={(event) => {
+            const next = event.target.value as ViewportStretchMethod;
+            setMethod(next);
+            onMethod(next);
+          }}
         >
           <option value="minmax">{t("rasterSymbology.viewportMinMax")}</option>
           <option value="percentile">{t("rasterSymbology.viewportPercentile")}</option>
