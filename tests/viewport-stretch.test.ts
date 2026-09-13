@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  normalizeStretchMethod,
   percentile,
   stretchSamples,
   viewportRange,
@@ -63,5 +64,20 @@ describe("percentile", () => {
 
   it("returns the only sample rather than indexing past the end", () => {
     assert.equal(percentile([42], 0.95), 42);
+  });
+});
+
+describe("normalizeStretchMethod", () => {
+  it("keeps a recognised method", () => {
+    assert.equal(normalizeStretchMethod("percentile"), "percentile");
+    assert.equal(normalizeStretchMethod("stddev"), "stddev");
+    assert.equal(normalizeStretchMethod("minmax"), "minmax");
+  });
+
+  it("falls back to minmax for a missing or unrecognised value", () => {
+    assert.equal(normalizeStretchMethod(undefined), "minmax");
+    assert.equal(normalizeStretchMethod(null), "minmax");
+    assert.equal(normalizeStretchMethod("bogus"), "minmax");
+    assert.equal(normalizeStretchMethod(3), "minmax");
   });
 });

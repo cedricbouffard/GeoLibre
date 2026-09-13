@@ -8,6 +8,15 @@
 export type ViewportStretchMethod = "minmax" | "percentile" | "stddev";
 
 /**
+ * The stretch method a persisted `rasterState` selects, falling back to
+ * `minmax` for a missing or unrecognised value. One place to widen if a fourth
+ * method is ever added, rather than a separate literal check per reader.
+ */
+export function normalizeStretchMethod(value: unknown): ViewportStretchMethod {
+  return value === "percentile" || value === "stddev" ? value : "minmax";
+}
+
+/**
  * The samples in a raster window reading that are safe to compute a stretch
  * from. `readRasterWindow` leaves NoData pixels at their sentinel value, and a
  * sentinel like -9999 is perfectly finite, so filtering on `Number.isFinite`

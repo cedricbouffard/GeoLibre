@@ -3,7 +3,7 @@ import type { MapEngine } from "@geolibre/map";
 import { RASTER_SOURCE_KIND, readRasterWindow } from "@geolibre/plugins";
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
-import { stretchSamples, viewportRange } from "../lib/viewport-stretch";
+import { normalizeStretchMethod, stretchSamples, viewportRange } from "../lib/viewport-stretch";
 
 export function useRasterViewportStretch(
   mapControllerRef: RefObject<MapEngine | null>,
@@ -32,7 +32,13 @@ export function useRasterViewportStretch(
       void run();
     });
     void run();
+    // zustand has no selector here, so this runs on every store mutation,
+    // including setPointerCoords on each mousemove. Every action that could
+    // change a stretch setting replaces the layers array, so an identity check
+    // skips the O(n*m) scan for the mutations that cannot matter, the same
+    // guard store.ts uses for its ellipsoid subscription.
     const unsubscribe = useAppStore.subscribe((state, previous) => {
+      if (state.layers === previous.layers) return;
       const changed = state.layers.some((layer) => {
         const before = previous.layers.find((item) => item.id === layer.id);
         return viewportStretchSettings(layer) !== viewportStretchSettings(before);
@@ -86,10 +92,7 @@ async function stretchLayer(
     if (!state || typeof state !== "object" || Array.isArray(state)) return;
     const raw = state as Record<string, unknown>;
     const band = readBand(raw);
-    const method =
-      raw.viewportStretchMethod === "percentile" || raw.viewportStretchMethod === "stddev"
-        ? raw.viewportStretchMethod
-        : "minmax";
+    const method = normalizeStretchMethod(raw.viewportStretchMethod);
     const reading = await readRasterWindow(layerId, {
       bounds,
       band,
@@ -119,6 +122,15 @@ async function stretchLayer(
         },
       },
     });
+  } catch (error) {
+    // The manual "Apply" button reports a failed read in the panel. This path
+    // has no such surface and runs on every camera idle, so it stays quiet
+    // rather than letting the rejection escape `void run()` and reach the
+    // diagnostics layer as a visible runtime error on each pan.
+    // A superseded read may reject rather than resolve, so check the signal
+    // itself instead of trusting any one error shape.
+    if (controller.signal.aborted) return;
+    console.warn(`Viewport stretch failed for layer ${layerId}`, error);
   } finally {
     if (requests.get(layerId) === controller) requests.delete(layerId);
   }

@@ -48,6 +48,7 @@ import { useColormapRamps } from "../../hooks/useColormapRamps";
 import { formatLegendNumber, setLegendCustomEntry } from "../../lib/auto-legend";
 import { savedRasterAttributeTable } from "../../lib/raster-attribute-table";
 import {
+  normalizeStretchMethod,
   stretchSamples,
   viewportRange,
   type ViewportStretchMethod,
@@ -129,10 +130,7 @@ function readRasterState(layer: GeoLibreLayer): RasterStateRecord {
     stretch: raw.stretch === "log" || raw.stretch === "sqrt" ? raw.stretch : "linear",
     gamma: typeof raw.gamma === "number" && raw.gamma > 0 ? raw.gamma : 1,
     viewportStretchAuto: raw.viewportStretchAuto === true,
-    viewportStretchMethod:
-      raw.viewportStretchMethod === "percentile" || raw.viewportStretchMethod === "stddev"
-        ? raw.viewportStretchMethod
-        : "minmax",
+    viewportStretchMethod: normalizeStretchMethod(raw.viewportStretchMethod),
   };
 }
 
