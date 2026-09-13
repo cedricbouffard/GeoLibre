@@ -1,10 +1,9 @@
 import { useAppStore } from "@geolibre/core";
 import type { MapEngine } from "@geolibre/map";
-import { readRasterWindow } from "@geolibre/plugins";
+import { RASTER_SOURCE_KIND, readRasterWindow } from "@geolibre/plugins";
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
-
-export type ViewportStretchMethod = "minmax" | "percentile" | "stddev";
+import { stretchSamples, viewportRange } from "../lib/viewport-stretch";
 
 export function useRasterViewportStretch(
   mapControllerRef: RefObject<MapEngine | null>,
@@ -19,7 +18,7 @@ export function useRasterViewportStretch(
       const layers = useAppStore.getState().layers.filter((layer) => {
         const state = layer.metadata.rasterState;
         return (
-          layer.metadata.sourceKind === "maplibre-gl-raster" &&
+          layer.metadata.sourceKind === RASTER_SOURCE_KIND &&
           state &&
           typeof state === "object" &&
           !Array.isArray(state) &&
@@ -50,11 +49,27 @@ export function useRasterViewportStretch(
   }, [mapControllerRef, mapReadyGeneration]);
 }
 
+/**
+ * Fingerprint of everything that changes what the auto stretch should compute:
+ * whether it is on, which method it uses, and which band it reads. The store
+ * subscription re-runs when this changes, and an in-flight read discards its
+ * result when it no longer matches, so switching band re-reads immediately
+ * instead of leaving the old band's range applied until the next camera move.
+ */
 function viewportStretchSettings(layer: { metadata: Record<string, unknown> } | undefined): string {
   const state = layer?.metadata.rasterState;
   if (!state || typeof state !== "object" || Array.isArray(state)) return "";
   const value = state as Record<string, unknown>;
-  return `${value.viewportStretchAuto === true}:${String(value.viewportStretchMethod ?? "minmax")}`;
+  return [
+    value.viewportStretchAuto === true,
+    String(value.viewportStretchMethod ?? "minmax"),
+    readBand(value),
+  ].join(":");
+}
+
+/** The band the raster state selects, defaulting to the first. */
+function readBand(state: Record<string, unknown>): number {
+  return Array.isArray(state.bands) && typeof state.bands[0] === "number" ? state.bands[0] : 1;
 }
 
 async function stretchLayer(
@@ -70,7 +85,7 @@ async function stretchLayer(
     const state = layer?.metadata.rasterState;
     if (!state || typeof state !== "object" || Array.isArray(state)) return;
     const raw = state as Record<string, unknown>;
-    const band = Array.isArray(raw.bands) && typeof raw.bands[0] === "number" ? raw.bands[0] : 1;
+    const band = readBand(raw);
     const method =
       raw.viewportStretchMethod === "percentile" || raw.viewportStretchMethod === "stddev"
         ? raw.viewportStretchMethod
@@ -83,17 +98,23 @@ async function stretchLayer(
       signal: controller.signal,
     });
     if (controller.signal.aborted || !reading) return;
-    const values = reading.values.filter(Number.isFinite);
+    const values = stretchSamples(reading);
     if (values.length === 0) return;
     const range = viewportRange(values, method);
     if (range[0] >= range[1]) return;
     const current = useAppStore.getState().layers.find((item) => item.id === layerId);
     if (!current || viewportStretchSettings(current) !== viewportStretchSettings(layer)) return;
+    const currentState =
+      (current.metadata.rasterState as Record<string, unknown> | undefined) ?? {};
+    // Panning over uniform ground recomputes the same range on every camera
+    // idle. Writing it back anyway would mark the project dirty and push an
+    // undo entry per idle, so only commit a range that actually moved.
+    if (sameRange(currentState.rescale, range)) return;
     useAppStore.getState().updateLayer(layerId, {
       metadata: {
         ...current.metadata,
         rasterState: {
-          ...((current.metadata.rasterState as Record<string, unknown> | undefined) ?? {}),
+          ...currentState,
           rescale: [range],
         },
       },
@@ -103,19 +124,9 @@ async function stretchLayer(
   }
 }
 
-function viewportRange(values: number[], method: ViewportStretchMethod): [number, number] {
-  const sorted = [...values].sort((a, b) => a - b);
-  if (method === "minmax") return [sorted[0], sorted[sorted.length - 1]];
-  if (method === "percentile") return [percentile(sorted, 0.05), percentile(sorted, 0.95)];
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-  const deviation = Math.sqrt(variance);
-  return [mean - 2 * deviation, mean + 2 * deviation];
-}
-
-function percentile(sorted: number[], fraction: number): number {
-  const position = fraction * (sorted.length - 1);
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+/** Whether the stored rescale already holds exactly the computed range. */
+function sameRange(stored: unknown, range: [number, number]): boolean {
+  if (!Array.isArray(stored) || stored.length !== 1) return false;
+  const first = stored[0];
+  return Array.isArray(first) && first[0] === range[0] && first[1] === range[1];
 }

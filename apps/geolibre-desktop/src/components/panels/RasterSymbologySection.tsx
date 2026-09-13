@@ -47,6 +47,11 @@ import { useTranslation } from "react-i18next";
 import { useColormapRamps } from "../../hooks/useColormapRamps";
 import { formatLegendNumber, setLegendCustomEntry } from "../../lib/auto-legend";
 import { savedRasterAttributeTable } from "../../lib/raster-attribute-table";
+import {
+  stretchSamples,
+  viewportRange,
+  type ViewportStretchMethod,
+} from "../../lib/viewport-stretch";
 
 type RasterStateRecord = {
   mode: "single" | "rgb" | "index";
@@ -1176,8 +1181,6 @@ function ClassOpacityInput({
   );
 }
 
-type ViewportStretchMethod = "minmax" | "percentile" | "stddev";
-
 function ViewportStretchControls({
   layerId,
   band,
@@ -1348,26 +1351,7 @@ async function readViewportValues(
     height: 32,
     signal,
   });
-  return reading?.values.filter(Number.isFinite) ?? [];
-}
-
-function viewportRange(values: number[], method: ViewportStretchMethod): [number, number] {
-  const sorted = [...values].sort((a, b) => a - b);
-  if (method === "minmax") return [sorted[0], sorted[sorted.length - 1]];
-  if (method === "percentile") return [percentile(sorted, 0.05), percentile(sorted, 0.95)];
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-  const deviation = Math.sqrt(variance);
-  return [mean - 2 * deviation, mean + 2 * deviation];
-}
-
-function percentile(sorted: number[], fraction: number): number {
-  if (sorted.length === 1) return sorted[0];
-  const position = fraction * (sorted.length - 1);
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  const weight = position - lower;
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
+  return stretchSamples(reading);
 }
 
 function RescaleControls({

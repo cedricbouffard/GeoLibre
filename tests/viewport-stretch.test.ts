@@ -1,0 +1,67 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  percentile,
+  stretchSamples,
+  viewportRange,
+} from "../apps/geolibre-desktop/src/lib/viewport-stretch";
+
+function reading(values: number[], nodata: number | null) {
+  return { values, nodata };
+}
+
+describe("stretchSamples", () => {
+  it("drops the NoData sentinel even though it is a finite number", () => {
+    // The bug this guards: -9999 passes Number.isFinite, so filtering on that
+    // alone would leave the fill in and pin a min/max stretch to it.
+    assert.deepEqual(stretchSamples(reading([-9999, 4, 9, -9999], -9999)), [4, 9]);
+  });
+
+  it("drops the NaN that an unreadable tile leaves behind", () => {
+    assert.deepEqual(stretchSamples(reading([1, Number.NaN, 3], null)), [1, 3]);
+  });
+
+  it("keeps every finite sample when the raster declares no NoData", () => {
+    assert.deepEqual(stretchSamples(reading([-9999, 0, 5], null)), [-9999, 0, 5]);
+  });
+
+  it("reads a window that missed the raster as no samples, not as a failure", () => {
+    assert.deepEqual(stretchSamples(reading([], 0)), []);
+  });
+
+  it("treats an unavailable layer as no samples", () => {
+    assert.deepEqual(stretchSamples(null), []);
+    assert.deepEqual(stretchSamples(undefined), []);
+  });
+});
+
+describe("viewportRange", () => {
+  it("spans the whole sample under minmax", () => {
+    assert.deepEqual(viewportRange([5, 1, 9, 3], "minmax"), [1, 9]);
+  });
+
+  it("clips the tails under percentile", () => {
+    const values = Array.from({ length: 101 }, (_, index) => index);
+    assert.deepEqual(viewportRange(values, "percentile"), [5, 95]);
+  });
+
+  it("spans two deviations either side of the mean under stddev", () => {
+    // mean 5, population variance 4, so deviation 2 and the range is 5 +/- 4.
+    assert.deepEqual(viewportRange([3, 7], "stddev"), [1, 9]);
+  });
+
+  it("collapses to the single value when the window sampled one usable pixel", () => {
+    assert.deepEqual(viewportRange([7], "minmax"), [7, 7]);
+    assert.deepEqual(viewportRange([7], "percentile"), [7, 7]);
+  });
+});
+
+describe("percentile", () => {
+  it("interpolates between the two straddling samples", () => {
+    assert.equal(percentile([0, 10], 0.25), 2.5);
+  });
+
+  it("returns the only sample rather than indexing past the end", () => {
+    assert.equal(percentile([42], 0.95), 42);
+  });
+});
