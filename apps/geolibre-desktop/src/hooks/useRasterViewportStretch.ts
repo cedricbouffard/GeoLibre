@@ -1,9 +1,14 @@
-import { useAppStore } from "@geolibre/core";
+import { useAppStore, type GeoLibreLayer } from "@geolibre/core";
 import type { MapEngine } from "@geolibre/map";
-import { RASTER_SOURCE_KIND, readRasterWindow } from "@geolibre/plugins";
+import { RASTER_SOURCE_KIND, readRasterWindow, savedRasterSymbology } from "@geolibre/plugins";
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
-import { normalizeStretchMethod, stretchSamples, viewportRange } from "../lib/viewport-stretch";
+import {
+  normalizeStretchMethod,
+  stretchSamples,
+  viewportRange,
+  wantsAutoStretch,
+} from "../lib/viewport-stretch";
 
 export function useRasterViewportStretch(
   mapControllerRef: RefObject<MapEngine | null>,
@@ -15,16 +20,7 @@ export function useRasterViewportStretch(
     const run = async (): Promise<void> => {
       const bounds = mapControllerRef.current?.getViewBounds?.();
       if (!bounds) return;
-      const layers = useAppStore.getState().layers.filter((layer) => {
-        const state = layer.metadata.rasterState;
-        return (
-          layer.metadata.sourceKind === RASTER_SOURCE_KIND &&
-          state &&
-          typeof state === "object" &&
-          !Array.isArray(state) &&
-          (state as Record<string, unknown>).viewportStretchAuto === true
-        );
-      });
+      const layers = useAppStore.getState().layers.filter(isAutoStretchLayer);
       await Promise.all(layers.map((layer) => stretchLayer(layer.id, bounds, requests.current)));
     };
 
@@ -53,6 +49,15 @@ export function useRasterViewportStretch(
       requests.current.clear();
     };
   }, [mapControllerRef, mapReadyGeneration]);
+}
+
+/** Whether the auto stretch should drive this layer. See `wantsAutoStretch`. */
+function isAutoStretchLayer(layer: GeoLibreLayer): boolean {
+  if (layer.metadata.sourceKind !== RASTER_SOURCE_KIND) return false;
+  return wantsAutoStretch(
+    layer.metadata.rasterState,
+    savedRasterSymbology(layer)?.classified === true,
+  );
 }
 
 /**
@@ -107,6 +112,10 @@ async function stretchLayer(
     if (range[0] >= range[1]) return;
     const current = useAppStore.getState().layers.find((item) => item.id === layerId);
     if (!current || viewportStretchSettings(current) !== viewportStretchSettings(layer)) return;
+    // The settings fingerprint does not cover mode or classification, so a
+    // switch to RGB or classified while this read was in flight would otherwise
+    // land a single-entry rescale on a layer that no longer wants one.
+    if (!isAutoStretchLayer(current)) return;
     const currentState =
       (current.metadata.rasterState as Record<string, unknown> | undefined) ?? {};
     // Panning over uniform ground recomputes the same range on every camera

@@ -58,3 +58,25 @@ export function percentile(sorted: number[], fraction: number): number {
   const weight = position - lower;
   return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
 }
+
+/**
+ * Whether a raster layer's state asks for the automatic viewport stretch.
+ *
+ * `viewportStretchAuto` alone is not enough. It is not cleared when the layer
+ * switches to RGB or becomes classified, and both of those own `rescale` on
+ * different terms: RGB expects one min/max pair per channel (`rescaleEntryCount`
+ * in core), and a classified layer derives its range from its breaks. Writing a
+ * single-entry range into either desyncs it on every camera idle.
+ *
+ * While the auto stretch lived inside `ViewportStretchControls` this gating was
+ * implicit, because the panel returns early for RGB and renders the control
+ * only when `!classified`, so the effect unmounted. A shell-level hook is
+ * always mounted and has to check both conditions itself.
+ */
+export function wantsAutoStretch(rasterState: unknown, classified: boolean): boolean {
+  if (!rasterState || typeof rasterState !== "object" || Array.isArray(rasterState)) return false;
+  const raw = rasterState as Record<string, unknown>;
+  if (raw.viewportStretchAuto !== true) return false;
+  if (raw.mode === "rgb") return false;
+  return !classified;
+}

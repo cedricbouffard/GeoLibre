@@ -5,6 +5,7 @@ import {
   percentile,
   stretchSamples,
   viewportRange,
+  wantsAutoStretch,
 } from "../apps/geolibre-desktop/src/lib/viewport-stretch";
 
 function reading(values: number[], nodata: number | null) {
@@ -79,5 +80,32 @@ describe("normalizeStretchMethod", () => {
     assert.equal(normalizeStretchMethod(null), "minmax");
     assert.equal(normalizeStretchMethod("bogus"), "minmax");
     assert.equal(normalizeStretchMethod(3), "minmax");
+  });
+});
+
+describe("wantsAutoStretch", () => {
+  it("drives a single-band raster with auto-stretch on", () => {
+    assert.equal(wantsAutoStretch({ mode: "single", viewportStretchAuto: true }, false), true);
+  });
+
+  it("leaves the layer alone when auto-stretch is off", () => {
+    assert.equal(wantsAutoStretch({ mode: "single" }, false), false);
+    assert.equal(wantsAutoStretch({ mode: "single", viewportStretchAuto: false }, false), false);
+  });
+
+  it("skips an RGB layer, whose rescale holds one pair per channel", () => {
+    // viewportStretchAuto is not cleared on the switch to RGB, so the mode
+    // check is what stops a single-entry range overwriting all three.
+    assert.equal(wantsAutoStretch({ mode: "rgb", viewportStretchAuto: true }, false), false);
+  });
+
+  it("skips a classified layer, whose range comes from its breaks", () => {
+    assert.equal(wantsAutoStretch({ mode: "single", viewportStretchAuto: true }, true), false);
+  });
+
+  it("treats a missing or malformed raster state as not asking for it", () => {
+    assert.equal(wantsAutoStretch(undefined, false), false);
+    assert.equal(wantsAutoStretch(null, false), false);
+    assert.equal(wantsAutoStretch([{ viewportStretchAuto: true }], false), false);
   });
 });
