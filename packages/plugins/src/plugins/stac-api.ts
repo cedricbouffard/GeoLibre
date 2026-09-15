@@ -6,6 +6,10 @@ export const PORTOLAN_REGISTRY_URL =
 const USGS_ASTROGEOLOGY_API_URL = "https://stac.astrogeology.usgs.gov/api";
 // No item-search endpoint to ask, so a page is however much of the tree the walk covers.
 const STATIC_SEARCH_READS_PER_PAGE = 300;
+// A `next` chain is only as finite as the server makes it, and `visited` catches a cycle that
+// repeats a URL, not a long walk of distinct ones. Stop after this many pages and use what was
+// reached, the same bound STATIC_SEARCH_READS_PER_PAGE puts on a static catalog crawl.
+const COLLECTION_PAGES_MAX = 50;
 const STATIC_SEARCH_CONCURRENCY = 12;
 
 export interface StacIndexCatalog {
@@ -424,16 +428,19 @@ async function loadStacCollections(
   const visited = new Set<string>();
   let pageUrl: string | undefined = href;
 
-  while (pageUrl && !visited.has(pageUrl)) {
+  while (pageUrl && !visited.has(pageUrl) && visited.size < COLLECTION_PAGES_MAX) {
     visited.add(pageUrl);
     // The annotation is load-bearing: narrowing `pageUrl` here means following it through the
     // assignment at the bottom of the loop, which reads `data` — a cycle TypeScript reports as
     // TS7022 unless `data` states its own type.
-    const data: StacCollectionsPage = await fetchJson<StacCollectionsPage>(
-      pageUrl,
-      { signal },
-      fetcher,
-    );
+    let data: StacCollectionsPage;
+    try {
+      data = await fetchJson<StacCollectionsPage>(pageUrl, { signal }, fetcher);
+    } catch {
+      // A page failing does not un-fetch the pages before it. The caller treats discovery as
+      // optional, so the pages that did arrive are worth more than the whole crawl thrown away.
+      break;
+    }
     if (Array.isArray(data.collections)) {
       collections.push(...data.collections.filter(isStacCollection));
     }
