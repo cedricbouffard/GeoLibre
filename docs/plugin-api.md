@@ -78,6 +78,23 @@ export interface GeoLibreSelection {
   features: Feature<Geometry | null>[];
 }
 
+export interface GeoLibreRasterWindowOptions {
+  bounds: [number, number, number, number];  // WGS84 [west, south, east, north]
+  width?: number;                            // sample grid, default 32
+  height?: number;
+  band?: number;                             // 1-based, default 1
+  signal?: AbortSignal;
+}
+
+export interface GeoLibreRasterWindowReading {
+  values: number[];        // row-major, width * height, nodata included
+  width: number;
+  height: number;
+  band: number;
+  nodata: number | null;
+  overviewLevel: number;
+}
+
 export interface GeoLibreAppAPI {
   setBasemap: (styleUrl: string) => void;
   addGeoJsonLayer: (
@@ -89,6 +106,12 @@ export interface GeoLibreAppAPI {
   getLayerFeatures?: (layerId: string) => Feature<Geometry | null>[];
   getSelectedFeatures?: () => Feature<Geometry | null>[];
   getSelectedLayerId?: () => string | null;
+  // Sample a raster layer over a geographic window. See "Sampling raster
+  // values" below.
+  readRasterWindow?: (
+    layerId: string,
+    options: GeoLibreRasterWindowOptions,
+  ) => Promise<GeoLibreRasterWindowReading | null>;
   getDrawnFeatures?: () => Feature<Geometry | null>[];
   onSelectionChange?: (
     callback: (selection: GeoLibreSelection) => void,
@@ -1106,6 +1129,54 @@ The assistant refreshes its tools before the next prompt while retaining its
 conversation history. Plugin callbacks execute plugin-authored code, like a
 panel button; they should use the app API to update layers and other app state.
 
+### Assistant guidance
+
+A tool's description is read only after the model has already decided which
+tool to call; that decision is driven by the system prompt. When a plugin's
+tools need rules about *when* to use them (for example, "call
+`get_pm25_ranking` directly, never as a table function inside `run_sql`"),
+register that text as guidance and the host appends it to the assistant's
+system prompt:
+
+```js
+let disposeGuidance;
+
+export default {
+  id: "air-quality",
+  name: "Air quality",
+  version: "1.0.0",
+  activate(app) {
+    // ...register tools as above...
+    disposeGuidance = app.registerAssistantGuidance?.(
+      [
+        "For PM2.5 questions, call plugin_11_air-quality_get_pm25_ranking directly",
+        "with its own arguments. Never wrap it in run_sql or use it as a FROM clause;",
+        "it is not a SQL table function.",
+      ].join(" "),
+    );
+  },
+  deactivate() {
+    disposeGuidance?.();
+    disposeGuidance = undefined;
+  },
+};
+```
+
+Guidance is appended under a `Plugin guidance:` heading after GeoLibre's own
+prompt, in registration order, each block labelled `[plugin <id>]` with the
+plugin that registered it, and never replaces or edits the host text. The
+heading tells the model the text only governs when and how to call the plugin's
+own tools and that the host guidelines still apply. The text itself is not
+filtered: like plugin code, it is trusted once the plugin is loaded, so only
+install plugins you trust. It must be a non-empty string of at most 4000 characters; identical text from the
+same plugin replaces the earlier registration instead of repeating it. Like
+tools, guidance is activation-only: the host injects the plugin owner, ignores
+any owner argument a plugin supplies, removes the text on deactivation, failed
+activation, and plugin removal, and the app handed to the other lifecycle
+callbacks omits the method. The assistant recomposes its system prompt together
+with its tools before the next prompt, keeping the conversation history.
+Feature-detect the method for older hosts.
+
 The host exposes `app.getMapRenderer()` to read the current primary renderer.
 Engine declarations are enforced by the plugin manager for activation, URL
 parameters, project restoration, and delayed control registration, as well as
@@ -1154,6 +1225,47 @@ are the reference implementations of this pattern. A plugin bound to the globe
 must restore any scene state it changes on `deactivate`, because both engines
 are rebuilt on a renderer swap and the host re-activates compatible plugins
 against the new one.
+
+### Sampling raster values
+
+`app.readRasterWindow(layerId, options)` reads one band of a raster layer over
+a geographic window, downsampled to a small grid. It is what the viewport
+stretch uses: pair it with `getViewBounds()` to compute a rescale range from
+the pixels actually on screen, rather than from the whole scene.
+
+It resolves `null` when the layer is unavailable: missing, or not a raster the
+control has loaded. Bounds that do not intersect the raster are **not** `null`.
+That is a reading with an empty `values`, so check the length rather than only
+the null. It reads from the nearest suitable overview for the requested
+`width`/`height`, so a 32x32 window over a continent is a cheap batched read
+rather than one request per sample.
+
+`values` is row-major, and the two ways a cell can be unusable are different.
+Unreadable tiles come back as `NaN`, but **NoData pixels keep their sentinel
+value**, and a sentinel like `-9999` is perfectly finite. Filtering on
+`Number.isFinite` alone therefore leaves the fill in and drags a min/max
+stretch down to it. Compare against `reading.nodata` as well:
+
+```typescript
+const bounds = app.getViewBounds?.();
+if (!bounds) return;  // no map mounted, or the globe is mid-morph
+const reading = await app.readRasterWindow?.(layerId, {
+  bounds,
+  band: 1,
+  width: 32,
+  height: 32,
+  signal: controller.signal,
+});
+const values =
+  reading?.values.filter(
+    (value) => Number.isFinite(value) && value !== reading.nodata,
+  ) ?? [];
+if (values.length === 0) return;  // window missed the raster entirely
+```
+
+Pass a `signal` for anything driven by camera movement and abort the previous
+read when a new one starts, so a fast pan does not queue a backlog of reads
+whose results land out of order.
 
 ### What a MapLibre control gets on the globe
 

@@ -36,6 +36,7 @@ export const WEB_SERVICE_PLUGIN_IDS = [
   "maplibre-gl-socrata",
   "maplibre-gl-ckan",
   "geolibre-stac-catalogs",
+  "geolibre-portolan",
   "maplibre-gl-source-coop",
   "maplibre-gl-natural-earth",
   "maplibre-gl-huggingface",

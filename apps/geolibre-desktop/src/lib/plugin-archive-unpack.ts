@@ -35,9 +35,10 @@ function isRequiredManifestString(value: unknown): value is string {
  * @param value - The unknown value to validate.
  * @returns `true` when the value is a valid engines array, otherwise `false`.
  */
-export function isPluginEngineList(value: unknown): value is ("maplibre" | "cesium")[] {
+export function isPluginEngineList(value: unknown): value is ("maplibre" | "cesium" | "mapbox")[] {
   return (
-    Array.isArray(value) && value.every((engine) => engine === "maplibre" || engine === "cesium")
+    Array.isArray(value) &&
+    value.every((engine) => engine === "maplibre" || engine === "cesium" || engine === "mapbox")
   );
 }
 

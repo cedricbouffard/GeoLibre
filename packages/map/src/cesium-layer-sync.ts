@@ -3,7 +3,7 @@ import { bindDocumentOpacity } from "./cesium-document-opacity";
 import {
   cesiumIonAssetId,
   compileFeatureExpression,
-  compileQuickFilters,
+  compileLayerFilters,
   czmlSource,
   DEFAULT_LAYER_STYLE,
   geojsonHasZCoordinates,
@@ -291,9 +291,10 @@ interface LayerEntry {
 }
 
 /**
- * Compose a layer's per-feature filter expression from its transient time filter,
- * embed API filter, compiled quick filters, rule-based visibility filter, and
- * annotation visibility filter. Returns null when no filter constrains the layer.
+ * Compose a layer's per-feature filter expression from its transient time
+ * filter, embed API filter, persisted authored filters, rule-based visibility
+ * filter, and annotation visibility filter. Returns null when no filter
+ * constrains the layer.
  */
 export function composeLayerFeatureFilter(layer: GeoLibreLayer): unknown[] | null {
   const filters: unknown[] = [];
@@ -304,9 +305,9 @@ export function composeLayerFeatureFilter(layer: GeoLibreLayer): unknown[] | nul
   if (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) {
     filters.push(layer.embedFilter);
   }
-  const quickFilter = compileQuickFilters(layer.quickFilters);
-  if (quickFilter) {
-    filters.push(quickFilter);
+  const authoredFilter = compileLayerFilters(layer);
+  if (authoredFilter) {
+    filters.push(authoredFilter);
   }
   const ruleFilter = ruleBasedVisibilityFilter(layer.style ?? {});
   if (ruleFilter) {

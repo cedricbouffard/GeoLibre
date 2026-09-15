@@ -107,7 +107,7 @@ The **Layer actions** menu (the `…` button) holds everything else:
 | **Open attribute table** | Show this layer's records in the [Attribute table](attribute-table.md). |
 | **Quick analysis** | Run a buffer, centroids, convex hull, or bounding box over the whole layer with no dialog. See [Right-click quick actions](map-controls.md#right-click-quick-actions). |
 | **Select features** | The interactive selection modes: by click, rectangle, polygon, freehand, or radius, plus **Clear Selection**. Hold `Shift` to add, `Alt` to remove, `Shift`+`Alt` to intersect, and `Esc` to cancel. |
-| **Select by Expression…** / **Select by Location…** | Build a selection from an attribute expression or a spatial relationship. Both are also on the [Edit menu](interface.md#the-top-toolbar). |
+| **Select by Expression…** / **Select by Location…** | Build a selection from an attribute expression or a spatial relationship. Select by Expression can also apply the expression as a persistent layer filter, hiding non-matching features without creating a new layer. Both are also on the [Edit menu](interface.md#the-top-toolbar). |
 | **Bind to Time Slider…** | Drive the Time Slider from one of this layer's date or number fields. |
 | **Export** | Write the layer out as GeoJSON, GeoParquet, GeoPackage, KML, KMZ, zipped Shapefile, or CSV (attributes only). |
 | **Styles** | Import and export symbology — see [below](#importing-and-exporting-styles). |
@@ -124,7 +124,8 @@ Vector layers have a **Layer actions → Styles** submenu for symbology intercha
 - **Export GeoLibre URL style** writes a compact `.geolibre.style.json` file designed for the [`data` and `style` URL parameters](embedding.md#open-remote-data). It contains no feature data. Its MapLibre render layers use the original GeoJSON filename stem as `source`, allowing one style document to distinguish GeoJSON members in a ZIP.
 - **Export as Mapbox GL style** writes a self-contained Mapbox/MapLibre style with the layer's GeoJSON embedded.
 - **Export as OGC SLD** and **Export as QGIS QML** produce styles for other desktop and server GIS software.
-- **Import style (GeoLibre URL / Mapbox GL / SLD / QML)…** applies a supported style file to the selected layer. When importing a GeoLibre URL style interactively, the filename-based `source` association is ignored because the selected layer is the target.
+- **Import style from file (GeoLibre URL / Mapbox GL / SLD / QML)…** applies a supported style file to the selected layer. When importing a GeoLibre URL style interactively, the filename-based `source` association is ignored because the selected layer is the target.
+- **Import style from text…** opens a box to paste a style into, for one copied out of QGIS, a gist, or a catalog page rather than saved to disk. It reads the same four formats, decided from the text rather than a file extension, and reports the same warnings. The Style panel header carries the same box, so you do not have to leave the panel to reach it.
 - **Saved styles (Style Manager)…** applies a preset from your style library, or saves the current symbology into it. The same library is reachable from **Settings → Style Manager**.
 
 To use a GeoLibre URL style, upload it to a CORS-enabled web host and open GeoLibre with both URLs:

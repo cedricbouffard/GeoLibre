@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@geolibre/ui";
 import { Database } from "lucide-react";
+import { useAppStore } from "@geolibre/core";
 import { Fragment, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { AddDataKind } from "../AddDataDialog";
@@ -15,6 +16,7 @@ import { isMobile } from "../../../lib/is-mobile";
 import { masHidesDataSource } from "../../../lib/mas-build";
 import { useDesktopSettingsStore } from "../../../hooks/useDesktopSettings";
 import { useMapCapabilities } from "../../../hooks/useMapCapabilities";
+import { supportsAddDataRenderer } from "../../../lib/add-data-renderer";
 import {
   DATA_SOURCE_CATALOG,
   DATA_SOURCE_SECTION_LABEL_KEYS,
@@ -27,6 +29,7 @@ interface AddDataMenuProps {
   chrome: ToolbarChrome;
   addLayer: AddLayerHandlers;
   osmPbfBusy: boolean;
+  disabled?: boolean;
   /** Whether the 3D globe is the primary renderer (gates the Cesium-only sources). */
   cesiumPrimary?: boolean;
   onSetAddDataKind: (kind: AddDataKind) => void;
@@ -44,6 +47,7 @@ export function AddDataMenu({
   chrome,
   addLayer,
   osmPbfBusy,
+  disabled = false,
   cesiumPrimary = false,
   onSetAddDataKind,
   onAddGltfModel,
@@ -52,6 +56,7 @@ export function AddDataMenu({
   const { t } = useTranslation();
   const uiProfile = useDesktopSettingsStore((state) => state.desktopSettings.uiProfile);
   const capabilities = useMapCapabilities();
+  const renderer = useAppStore((state) => state.primaryRenderer);
   // PostgreSQL layers are served through the Martin tile server, a local helper
   // binary with no Android build, so hide the source on mobile.
   // The user agent is stable for the session, so evaluate once.
@@ -136,6 +141,7 @@ export function AddDataMenu({
           variant="ghost"
           size={chrome.buttonSize}
           aria-label={t("toolbar.menu.addData")}
+          disabled={disabled}
         >
           <Database className={chrome.iconClassName} />
           {chrome.renderLabel(t("toolbar.menu.addData"))}
@@ -158,8 +164,14 @@ export function AddDataMenu({
             {group.entries.map((entry) => {
               const item = handlers[entry.id];
               if (!item) return null;
+              const supported = supportsAddDataRenderer(entry.id, renderer);
               return (
-                <DropdownMenuItem key={entry.id} disabled={item.disabled} onSelect={item.onSelect}>
+                <DropdownMenuItem
+                  key={entry.id}
+                  disabled={item.disabled || !supported}
+                  title={supported ? undefined : t("renderer.layerMapboxUnsupported")}
+                  onSelect={item.onSelect}
+                >
                   {t(entry.labelKey)}
                 </DropdownMenuItem>
               );

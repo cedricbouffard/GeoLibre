@@ -1,5 +1,5 @@
 diff --git a/node_modules/@carbonplan/zarr-layer/dist/index.js b/node_modules/@carbonplan/zarr-layer/dist/index.js
-index 9fc526c8..213a1f8b 100644
+index 7f5cfed..3ee75d9 100644
 --- a/node_modules/@carbonplan/zarr-layer/dist/index.js
 +++ b/node_modules/@carbonplan/zarr-layer/dist/index.js
 @@ -2497,9 +2497,17 @@ function createShaderProgram(gl, options) {

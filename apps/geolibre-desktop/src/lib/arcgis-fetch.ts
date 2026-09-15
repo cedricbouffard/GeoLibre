@@ -5,9 +5,13 @@ interface ArcGISResponse {
   body: string;
 }
 
-type ArcGISRequest = (url: string, signal?: AbortSignal | null) => Promise<ArcGISResponse>;
+type ArcGISRequest = (
+  url: string,
+  signal?: AbortSignal | null,
+  body?: string,
+) => Promise<ArcGISResponse>;
 
-/** Adapt the guarded GET-only Rust command to ArcGIS's fetch transport. */
+/** Adapt the guarded Rust command to ArcGIS's fetch transport. */
 export function createNativeArcGISFetch(request: ArcGISRequest): typeof globalThis.fetch {
   return async (input, init) => {
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
@@ -15,8 +19,15 @@ export function createNativeArcGISFetch(request: ArcGISRequest): typeof globalTh
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
     const body = init?.body ?? (input instanceof Request ? input.body : null);
-    if (method.toUpperCase() !== "GET" || body != null || [...headers].length > 0) {
-      throw new Error("Native ArcGIS fetch only supports GET without headers or a body.");
+    const post =
+      method.toUpperCase() === "POST" &&
+      typeof body === "string" &&
+      headers.get("Content-Type") === "application/x-www-form-urlencoded" &&
+      [...headers].length === 1;
+    if (!post && (method.toUpperCase() !== "GET" || body != null || [...headers].length > 0)) {
+      throw new Error(
+        "Native ArcGIS fetch only supports GET without headers or a body, or form-encoded POST.",
+      );
     }
     const url = input instanceof Request ? input.url : input.toString();
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
@@ -24,7 +35,7 @@ export function createNativeArcGISFetch(request: ArcGISRequest): typeof globalTh
     let onAbort: (() => void) | undefined;
     try {
       // Reject promptly while the native cancellation acknowledgement is in flight.
-      const pending = request(url, signal);
+      const pending = request(url, signal, post ? (body as string) : undefined);
       const result = signal
         ? await Promise.race([
             pending,
@@ -52,7 +63,7 @@ export function createArcGISRequest(
   invoke: typeof nativeInvoke,
   createReady: () => Pick<Channel<void>, "onmessage">,
 ): ArcGISRequest {
-  return async (url, signal) => {
+  return async (url, signal, body) => {
     signal?.throwIfAborted();
     const requestId = crypto.randomUUID();
     const ready = createReady();
@@ -70,7 +81,12 @@ export function createArcGISRequest(
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await invoke<ArcGISResponse>("fetch_arcgis_response", { url, requestId, ready });
+      return await invoke<ArcGISResponse>("fetch_arcgis_response", {
+        url,
+        requestId,
+        ready,
+        ...(body === undefined ? {} : { body }),
+      });
     } finally {
       signal?.removeEventListener("abort", onAbort);
     }

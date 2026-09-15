@@ -57,6 +57,9 @@ fn client() -> Result<reqwest::Client, String> {
                 .dns_resolver(Arc::new(GuardedDnsResolver))
                 .user_agent("GeoLibre Desktop")
                 .redirect(Policy::custom(|attempt| {
+                    if attempt.previous().iter().any(|url| url.path().ends_with("/applyEdits")) {
+                        return attempt.error("ArcGIS write redirects are not allowed.");
+                    }
                     if attempt.previous().len() >= MAX_HTTP_REDIRECTS {
                         return attempt.error("Too many ArcGIS redirects.");
                     }
@@ -144,14 +147,25 @@ async fn read_response(
     })
 }
 
-async fn request(url: String) -> Result<ArcGISResponse, String> {
+async fn request(url: String, body: Option<String>) -> Result<ArcGISResponse, String> {
     let url = Url::parse(&url).map_err(|_| "Invalid ArcGIS URL.".to_string())?;
+    if body.is_some() && (url.scheme() != "https" || !url.path().ends_with("/applyEdits")) {
+        return Err("ArcGIS writes require an HTTPS applyEdits endpoint.".into());
+    }
+    if body.as_ref().is_some_and(|value| value.len() > MAX_ARCGIS_BODY_BYTES) {
+        return Err("ArcGIS edit request exceeds the 64 MiB limit.".into());
+    }
     let checked = url.clone();
     tauri::async_runtime::spawn_blocking(move || validate_url(&checked))
         .await
         .map_err(|error| format!("ArcGIS validation failed: {error}"))??;
-    let response = client()?
-        .get(url)
+    let client = client()?;
+    let request = if let Some(body) = body {
+        client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(body)
+    } else {
+        client.get(url)
+    };
+    let response = request
         .timeout(Duration::from_secs(120))
         .send()
         .await
@@ -165,6 +179,7 @@ async fn request(url: String) -> Result<ArcGISResponse, String> {
 pub(crate) async fn fetch_arcgis_response(
     url: String,
     request_id: String,
+    body: Option<String>,
     ready: tauri::ipc::Channel<()>,
     requests: tauri::State<'_, ArcGISRequests>,
 ) -> Result<ArcGISResponse, String> {
@@ -173,7 +188,7 @@ pub(crate) async fn fetch_arcgis_response(
         if active.contains_key(&request_id) {
             return Err("Duplicate ArcGIS request ID.".into());
         }
-        let task = tauri::async_runtime::spawn(request(url));
+        let task = tauri::async_runtime::spawn(request(url, body));
         let abort = task.inner().abort_handle();
         active.insert(request_id.clone(), Box::new(move || abort.abort()));
         task
@@ -296,7 +311,7 @@ mod tests {
             let result = stream.read(&mut request);
             closed_tx.send(matches!(result, Ok(0)) || matches!(result, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset)).unwrap();
         });
-        let task = tauri::async_runtime::spawn(request(url));
+        let task = tauri::async_runtime::spawn(request(url, None));
         let abort = task.inner().abort_handle();
         let requests = ArcGISRequests::default();
         requests

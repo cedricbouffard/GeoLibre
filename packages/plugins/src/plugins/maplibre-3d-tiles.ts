@@ -1,3 +1,4 @@
+import { restoreMapboxTiles, isMapboxTilesLayer } from "./mapbox-3d-tiles";
 import {
   DEFAULT_LAYER_STYLE,
   GOOGLE_MAPS_API_KEY_HEADER,
@@ -171,6 +172,11 @@ export function closeThreeDTilesLayerPanel(app: GeoLibreAppAPI): void {
 export function restoreThreeDTilesLayers(app: GeoLibreAppAPI): void {
   restoreGooglePhotorealisticTilesLayers(app);
   restoreArcgisI3sTilesLayers(app);
+  if (app.getMapRenderer?.() === "mapbox") {
+    if (useAppStore.getState().layers.some(isMapboxTilesLayer))
+      void restoreMapboxTiles(app).catch(console.error);
+    return;
+  }
 
   const layers = useAppStore.getState().layers.filter(isThreeDTilesControlLayer);
   if (layers.length === 0) return;
@@ -283,7 +289,7 @@ function createThreeDTilesControl(): ThreeDTilesControl {
   addThreeDTilesRuntimeEnvListener(control);
   threeDTilesStoreUnsubscribe ??= useAppStore.subscribe((state, previous) => {
     if (state.layers !== previous.layers) {
-      updateGooglePhotorealisticTilesPanelList(control);
+      updateDeckTilesPanelList(control);
     }
 
     const currentById = new Map(state.layers.map((layer) => [layer.id, layer]));
@@ -315,6 +321,7 @@ function createThreeDTilesControl(): ThreeDTilesControl {
 }
 
 function syncThreeDTilesStoreFromControl(control: ThreeDTilesControl): void {
+  if (activeThreeDTilesApp?.getMapRenderer?.() === "mapbox") return;
   const store = useAppStore.getState();
   const state = control.getState();
   const tilesetIds = new Set(state.tilesets.map((tileset) => tileset.id));
@@ -346,6 +353,7 @@ function hydrateThreeDTilesControlFromStore(
   control: ThreeDTilesControl,
   options: { replaceExisting?: boolean } = {},
 ): void {
+  if (activeThreeDTilesApp?.getMapRenderer?.() === "mapbox") return;
   const layers = useAppStore.getState().layers.filter(isThreeDTilesControlLayer);
   if (layers.length === 0) return;
 
@@ -626,7 +634,7 @@ function installThreeDTilesPanelHandlers(control: ThreeDTilesControl | null): vo
     installThreeDTilesCloseHandler(control, panel);
     if (control) {
       installGooglePhotorealisticTilesPanelHandlers(control, panel);
-      updateGooglePhotorealisticTilesPanelList(control);
+      updateDeckTilesPanelList(control);
       installArcgisI3sTilesPanelHandlers(control, panel);
     }
   }
@@ -680,7 +688,52 @@ function installGooglePhotorealisticTilesPanelHandlers(
         return;
       }
       applyDefaults();
-      if (!isGooglePhotorealisticTilesetUrl(urlInput?.value ?? "")) return;
+      const url = urlInput?.value.trim() ?? "";
+      // A blank URL falls through to the library's own submit handler so its
+      // "Tileset URL is required." error is shown, on Mapbox as on MapLibre.
+      if (
+        url &&
+        activeThreeDTilesApp?.getMapRenderer?.() === "mapbox" &&
+        !isGooglePhotorealisticTilesetUrl(url) &&
+        !isArcgisI3sSceneLayerUrl(url)
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const id = `tiles-${crypto.randomUUID()}`;
+        const layer = createThreeDTilesStoreLayer(
+          {
+            id,
+            layerId: `${id}-tiles`,
+            tilesetUrl: url,
+            layerName:
+              panel
+                .querySelector<HTMLInputElement>('input[aria-label="Layer name"]')
+                ?.value.trim() || "3D Tiles",
+            altitudeOffset: numberInputValue(
+              panel.querySelector<HTMLInputElement>('input[aria-label="Altitude offset"]')?.value,
+              0,
+            ),
+            opacity: control.getState().opacity,
+            visible:
+              panel.querySelector<HTMLInputElement>('input[aria-label="Visible on load"]')
+                ?.checked ?? true,
+            requestHeaders: parseThreeDTilesRequestHeaders(
+              panel.querySelector<HTMLTextAreaElement>('textarea[aria-label="Request headers"]')
+                ?.value ?? "",
+            ),
+            status: "loading",
+          },
+          control.getState().opacity,
+        );
+        useAppStore.getState().addLayer(layer);
+        const flyTo =
+          panel.querySelector<HTMLInputElement>('input[aria-label="Fly to tileset after load"]')
+            ?.checked ?? true;
+        void restoreMapboxTiles(activeThreeDTilesApp, flyTo ? id : undefined).catch(console.error);
+        control.collapse();
+        return;
+      }
+      if (!isGooglePhotorealisticTilesetUrl(url)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       void addGooglePhotorealisticTilesFromPanel(control, panel);
@@ -887,7 +940,7 @@ async function addGooglePhotorealisticTilesFromPanel(
     map: control.getMap(),
   });
   control.collapse();
-  updateGooglePhotorealisticTilesPanelList(control);
+  updateDeckTilesPanelList(control);
 }
 
 /**
@@ -1009,18 +1062,24 @@ function addGooglePhotorealisticTilesLayer(
   return id;
 }
 
-function updateGooglePhotorealisticTilesPanelList(control: ThreeDTilesControl | null): void {
+function updateDeckTilesPanelList(control: ThreeDTilesControl | null): void {
   const panel = getThreeDTilesPanel(control);
   if (!panel) return;
 
   const nativeTilesetCount = control?.getState().tilesets.length ?? 0;
-  const googleLayers = useAppStore.getState().layers.filter(isGooglePhotorealisticTilesLayer);
+  const googleLayers = useAppStore
+    .getState()
+    .layers.filter(
+      (layer) =>
+        isGooglePhotorealisticTilesLayer(layer) ||
+        (activeThreeDTilesApp?.getMapRenderer?.() === "mapbox" && isMapboxTilesLayer(layer)),
+    );
   const nativeStatus = panel.querySelector<HTMLElement>(".three-d-tiles-status");
   if (nativeStatus) {
     nativeStatus.hidden = nativeTilesetCount === 0 && googleLayers.length > 0;
   }
 
-  const googleList = ensureGooglePhotorealisticTilesPanelList(panel);
+  const googleList = ensureDeckTilesPanelList(panel);
   googleList.hidden = googleLayers.length === 0;
 
   // Only rebuild the DOM when the SET of Google layers changes. This runs on
@@ -1031,18 +1090,34 @@ function updateGooglePhotorealisticTilesPanelList(control: ThreeDTilesControl | 
   // is updated by renderGooglePhotorealisticTilesLayers, so skipping the
   // rebuild when the ids are unchanged is safe.
   const idSignature = googleLayers.map((layer) => layer.id).join("|");
-  if (googleList.dataset.geolibreGoogleListIds === idSignature) return;
+  if (googleList.dataset.geolibreGoogleListIds === idSignature) {
+    for (const layer of googleLayers) {
+      const item = Array.from(googleList.children).find(
+        (child) => (child as HTMLElement).dataset.layerId === layer.id,
+      );
+      const status = item?.querySelector<HTMLElement>(".three-d-tiles-list-status");
+      if (status) {
+        status.textContent = String(layer.metadata.error ?? layer.metadata.status ?? "loaded");
+        status.dataset.status = String(layer.metadata.status ?? "loaded");
+      }
+      const visible = item?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      if (visible) visible.checked = layer.visible;
+      const opacity = item?.querySelector<HTMLInputElement>('input[type="range"]');
+      if (opacity) opacity.value = String(layer.opacity);
+    }
+    return;
+  }
   googleList.dataset.geolibreGoogleListIds = idSignature;
 
   googleList.replaceChildren();
   if (googleLayers.length === 0) return;
 
   for (const layer of googleLayers) {
-    googleList.appendChild(createGooglePhotorealisticTilesPanelListItem(layer));
+    googleList.appendChild(createDeckTilesPanelListItem(layer));
   }
 }
 
-function ensureGooglePhotorealisticTilesPanelList(panel: HTMLElement): HTMLElement {
+function ensureDeckTilesPanelList(panel: HTMLElement): HTMLElement {
   const existing = panel.querySelector<HTMLElement>(".geolibre-google-tiles-list");
   if (existing) return existing;
 
@@ -1060,9 +1135,10 @@ function ensureGooglePhotorealisticTilesPanelList(panel: HTMLElement): HTMLEleme
   return googleList;
 }
 
-function createGooglePhotorealisticTilesPanelListItem(layer: GeoLibreLayer): HTMLElement {
+function createDeckTilesPanelListItem(layer: GeoLibreLayer): HTMLElement {
   const item = document.createElement("div");
   item.className = "geolibre-google-tiles-list-item three-d-tiles-list-item active";
+  item.dataset.layerId = layer.id;
 
   const meta = document.createElement("div");
   meta.className = "three-d-tiles-list-meta";
@@ -1072,17 +1148,26 @@ function createGooglePhotorealisticTilesPanelListItem(layer: GeoLibreLayer): HTM
   title.type = "button";
   title.textContent = layer.name || GOOGLE_PHOTOREALISTIC_TILES_LABEL;
   title.addEventListener("click", () => {
-    if (googleTilesApp) flyToGooglePhotorealisticTiles(googleTilesApp);
+    if (isMapboxTilesLayer(layer)) {
+      const current = useAppStore.getState().layers.find(({ id }) => id === layer.id);
+      const center = current?.metadata.center;
+      if (Array.isArray(center))
+        activeThreeDTilesApp?.getMapboxMap?.()?.flyTo({
+          center: [Number(center[0]), Number(center[1])],
+          zoom: Number(current?.metadata.zoom ?? 16),
+          pitch: 60,
+        });
+    } else if (googleTilesApp) flyToGooglePhotorealisticTiles(googleTilesApp);
   });
 
   const url = document.createElement("span");
   url.className = "three-d-tiles-list-url";
-  url.textContent = GOOGLE_PHOTOREALISTIC_TILES_URL;
+  url.textContent = String(layer.source.url ?? GOOGLE_PHOTOREALISTIC_TILES_URL);
 
   const status = document.createElement("span");
   status.className = "three-d-tiles-list-status";
-  status.dataset.status = "loaded";
-  status.textContent = "loaded";
+  status.dataset.status = String(layer.metadata.status ?? "loaded");
+  status.textContent = String(layer.metadata.error ?? layer.metadata.status ?? "loaded");
 
   meta.appendChild(title);
   meta.appendChild(url);
@@ -1119,7 +1204,16 @@ function createGooglePhotorealisticTilesPanelListItem(layer: GeoLibreLayer): HTM
 
   const flyTo = createGooglePhotorealisticTilesPanelSmallButton("Fly");
   flyTo.addEventListener("click", () => {
-    if (googleTilesApp) flyToGooglePhotorealisticTiles(googleTilesApp);
+    if (isMapboxTilesLayer(layer)) {
+      const current = useAppStore.getState().layers.find(({ id }) => id === layer.id);
+      const center = current?.metadata.center;
+      if (Array.isArray(center))
+        activeThreeDTilesApp?.getMapboxMap?.()?.flyTo({
+          center: [Number(center[0]), Number(center[1])],
+          zoom: Number(current?.metadata.zoom ?? 16),
+          pitch: 60,
+        });
+    } else if (googleTilesApp) flyToGooglePhotorealisticTiles(googleTilesApp);
   });
 
   const remove = createGooglePhotorealisticTilesPanelSmallButton("Remove");
@@ -1157,7 +1251,7 @@ function flyToGooglePhotorealisticTiles(
     },
     false,
   );
-  const map = mapOverride ?? app.getMap?.();
+  const map = mapOverride ?? app.getMap?.() ?? app.getMapboxMap?.();
   if (!map) {
     app.fitBounds?.([14.35, 50.05, 14.49, 50.12]);
     return;

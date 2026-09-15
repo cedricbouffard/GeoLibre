@@ -7,6 +7,7 @@
  */
 
 import {
+  localFileName,
   DEFAULT_LAYER_STYLE,
   type GeoLibreLayer,
   hasSimpleStyleProperties,
@@ -35,7 +36,7 @@ export function createLayerId(): string {
 }
 
 export function fileNameFromPath(path: string): string {
-  return path.split(/[/\\]/).pop() ?? path;
+  return localFileName(path);
 }
 
 export function layerNameFromPath(path: string, fallback: string): string {

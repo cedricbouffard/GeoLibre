@@ -636,6 +636,7 @@ async function refreshArcGISLayer(layer: GeoLibreLayer): Promise<GeoJsonRefreshR
   if (!queryUrl) throw new Error("This layer does not have a refreshable GeoJSON URL.");
 
   const data = await refreshArcGISFeatureLayer({
+    layerId: layer.id,
     maxFeatures: typeof source.maxFeatures === "number" ? source.maxFeatures : undefined,
     pageSize: typeof source.pageSize === "number" ? source.pageSize : undefined,
     queryUrl,

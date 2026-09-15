@@ -130,3 +130,22 @@ export function highlightLineLayerId(): string {
 export function highlightCircleLayerId(): string {
   return "geolibre-highlight-circle";
 }
+
+/**
+ * The Mapbox source id `compileMapboxLayer` derives for a store layer, and the
+ * fill/line style layer ids under it. They live here, not in
+ * `mapbox-layers.ts`, so a plugin that needs to find a store layer's Mapbox
+ * layers (the STAC footprint picker) shares the scheme at compile time instead
+ * of spelling it out.
+ */
+export function mapboxSourceId(layerId: string): string {
+  return `geolibre-mapbox-${layerId}`;
+}
+
+export function mapboxFillLayerId(layerId: string, sourceLayer?: string): string {
+  return `${mapboxSourceId(layerId)}-${sourceLayer ?? "geojson"}-fill`;
+}
+
+export function mapboxLineLayerId(layerId: string, sourceLayer?: string): string {
+  return `${mapboxSourceId(layerId)}-${sourceLayer ?? "geojson"}-line`;
+}

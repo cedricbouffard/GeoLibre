@@ -348,8 +348,24 @@ export function redactProjectCredentials(project: GeoLibreProject): CredentialRe
       }
     }
   }
+  // The Mapbox-only style is a URL like the shared basemap and can carry an
+  // access token; sweep it the same way so the save prompt counts it and a
+  // "strip" choice actually removes it.
+  const mapboxStyleUrl = project.preferences?.map?.mapboxStyleUrl;
+  const redactedMapboxStyleUrl =
+    typeof mapboxStyleUrl === "string" ? redactUrlCredentials(mapboxStyleUrl) : mapboxStyleUrl;
+  if (redactedMapboxStyleUrl !== mapboxStyleUrl) {
+    recordRedaction(accumulator, "preferences.map.mapboxStyleUrl", mapboxStyleUrl);
+  }
   const preferences = project.preferences
-    ? { ...project.preferences, environmentVariables: [], geocoding }
+    ? {
+        ...project.preferences,
+        environmentVariables: [],
+        geocoding,
+        ...(redactedMapboxStyleUrl !== mapboxStyleUrl
+          ? { map: { ...project.preferences.map, mapboxStyleUrl: redactedMapboxStyleUrl } }
+          : {}),
+      }
     : project.preferences;
   const populatedEnvironmentVariables =
     project.preferences?.environmentVariables?.filter((variable) => variable.key.trim()) ?? [];

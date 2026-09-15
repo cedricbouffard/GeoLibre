@@ -934,7 +934,11 @@ describe("parseMapboxStyle imports hand-written styles", () => {
       ],
     });
     assert.equal(result.style.fillColor, "#111111");
-    assert.ok(result.warnings.some((warning) => /only the first was imported/.test(warning)));
+    assert.ok(
+      result.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+    );
   });
 
   it("does not combine legacy layer filters into expression rules", () => {
@@ -958,7 +962,11 @@ describe("parseMapboxStyle imports hand-written styles", () => {
     assert.equal(result.matchedLayerCount, 1);
     assert.equal(result.style.vectorStyleMode, "single");
     assert.equal(result.style.fillColor, "#111111");
-    assert.ok(result.warnings.some((warning) => /only the first was imported/.test(warning)));
+    assert.ok(
+      result.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+    );
   });
 
   it("does not combine legacy !has filters into expression rules", () => {
@@ -982,7 +990,11 @@ describe("parseMapboxStyle imports hand-written styles", () => {
     assert.equal(result.matchedLayerCount, 1);
     assert.equal(result.style.vectorStyleMode, "single");
     assert.equal(result.style.fillColor, "#111111");
-    assert.ok(result.warnings.some((warning) => /only the first was imported/.test(warning)));
+    assert.ok(
+      result.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+    );
   });
 
   it("detects legacy comparisons nested under expression negation", () => {
@@ -1006,7 +1018,11 @@ describe("parseMapboxStyle imports hand-written styles", () => {
     assert.equal(result.matchedLayerCount, 1);
     assert.equal(result.style.vectorStyleMode, "single");
     assert.equal(result.style.fillColor, "#111111");
-    assert.ok(result.warnings.some((warning) => /only the first was imported/.test(warning)));
+    assert.ok(
+      result.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+    );
   });
 
   it("does not combine legacy none filters wrapping expression children", () => {
@@ -1030,7 +1046,11 @@ describe("parseMapboxStyle imports hand-written styles", () => {
     assert.equal(result.matchedLayerCount, 1);
     assert.equal(result.style.vectorStyleMode, "single");
     assert.equal(result.style.fillColor, "#111111");
-    assert.ok(result.warnings.some((warning) => /only the first was imported/.test(warning)));
+    assert.ok(
+      result.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+    );
   });
 
   it("combines a modern in filter with a string needle", () => {
@@ -1315,6 +1335,660 @@ describe("the colour a layer with no colour of its own is drawn in", () => {
       v8.paint_line?.["line-color"]?.requires,
       [{ "!": "line-pattern" }],
       "line-pattern still overrides line-color, so COLOR_OVERRIDING_PAINT must still list it",
+    );
+  });
+});
+
+// A layer the publisher switched off must not decide what the imported layer looks like while a
+// drawn one is available. `main` never read `layout.visibility` on this path at all.
+describe("a style layer the publisher switched off", () => {
+  const lineClass = (
+    id: string,
+    color: string,
+    options: { hidden?: boolean; minzoom?: number; maxzoom?: number } = {},
+  ) => ({
+    id,
+    type: "line",
+    "source-layer": "f",
+    ...(options.minzoom === undefined
+      ? {}
+      : { minzoom: options.minzoom, maxzoom: options.maxzoom }),
+    ...(options.hidden ? { layout: { visibility: "none" } } : {}),
+    paint: { "line-color": color },
+    filter: ["==", ["get", "c"], id],
+  });
+
+  const read = (layers: unknown[]) =>
+    applyMapboxStyleImport(DEFAULT_LAYER_STYLE, parseMapboxStyle({ layers } as never));
+
+  it("imports a hidden class switched off", () => {
+    const result = read([lineClass("a", "#00ff00"), lineClass("b", "#e60000", { hidden: true })]);
+
+    assert.equal(result.vectorStyleMode, "rule-based");
+    assert.deepEqual(
+      result.vectorRules
+        .filter((rule) => !rule.isElse)
+        // Absent means enabled, which is how every other rule this importer builds reads.
+        .map((rule) => [rule.label, rule.enabled ?? true]),
+      [
+        ["b", false],
+        ["a", true],
+      ],
+      "the class nobody sees comes in unchecked, the drawn one checked",
+    );
+  });
+
+  it("keeps a hidden class out of the zoom range", () => {
+    const result = read([
+      lineClass("a", "#00ff00", { minzoom: 4, maxzoom: 12 }),
+      lineClass("b", "#e60000", { hidden: true, minzoom: 0, maxzoom: 22 }),
+    ]);
+
+    assert.equal(result.minZoom, 4);
+    assert.equal(result.maxZoom, 12);
+  });
+
+  it("falls back to a single layer when every class is hidden", () => {
+    const result = read([
+      lineClass("a", "#00ff00", { hidden: true }),
+      lineClass("b", "#e60000", { hidden: true }),
+    ]);
+
+    assert.notEqual(
+      result.vectorStyleMode,
+      "rule-based",
+      "rules that are every one disabled would import the layer blank and report success",
+    );
+  });
+
+  it("prefers a drawn layer over an earlier hidden one", () => {
+    const result = read([
+      {
+        id: "h",
+        type: "line",
+        "source-layer": "f",
+        layout: { visibility: "none" },
+        paint: { "line-color": "#ff0000" },
+      },
+      { id: "d", type: "line", "source-layer": "f", paint: { "line-color": "#00ff00" } },
+      // An expression colour on any entry disqualifies the stack, forcing the single-layer path.
+      { id: "x", type: "line", "source-layer": "f", paint: { "line-color": ["get", "colour"] } },
+    ]);
+
+    assert.equal(result.strokeColor, "#00ff00");
+  });
+
+  it("does not let a hidden heatmap take the point renderer from a drawn circle", () => {
+    const result = read([
+      { id: "c", type: "circle", "source-layer": "f", paint: { "circle-color": "#00ff00" } },
+      { id: "h", type: "heatmap", "source-layer": "f", layout: { visibility: "none" } },
+    ]);
+
+    assert.equal(result.pointRenderer, "single");
+    assert.equal(result.fillColor, "#00ff00");
+  });
+
+  it("does not let a hidden extrusion take the layer from a drawn fill", () => {
+    const result = read([
+      { id: "f", type: "fill", "source-layer": "f", paint: { "fill-color": "#00ff00" } },
+      {
+        id: "e",
+        type: "fill-extrusion",
+        "source-layer": "f",
+        layout: { visibility: "none" },
+        paint: { "fill-extrusion-height": 10 },
+      },
+    ]);
+
+    assert.equal(result.extrusionEnabled, false);
+    assert.equal(result.fillColor, "#00ff00", "the drawn fill's colour survives");
+  });
+
+  // Two cases that are correct as they stand, guarded so the fix above does not take them with it.
+  it("still lets a lone hidden layer donate its paint", () => {
+    const result = read([
+      {
+        id: "h",
+        type: "line",
+        "source-layer": "f",
+        layout: { visibility: "none" },
+        paint: { "line-color": "#ff0000" },
+      },
+    ]);
+
+    assert.equal(result.strokeColor, "#ff0000", "there is no drawn alternative to prefer");
+  });
+
+  it("drops a hidden heatmap even when nothing else claims the point renderer", () => {
+    // One decision for the whole style, not one per contest: the question is whether the author
+    // left the layer on, not whether another layer wants the same field.
+    const style = parseMapboxStyle({
+      layers: [
+        { id: "f", type: "fill", "source-layer": "x", paint: { "fill-color": "#00ff00" } },
+        { id: "h", type: "heatmap", "source-layer": "x", layout: { visibility: "none" } },
+      ],
+    } as never);
+
+    assert.equal(style.style.pointRenderer, undefined);
+    assert.deepEqual(style.warnings, ["The style's heatmap layer is hidden; it was not imported."]);
+  });
+
+  it("does not import labels from a symbol switched off beside drawn paint", () => {
+    // A hand-authored style turning labels off. Distinct from the case below, where the whole
+    // style is hidden because GeoLibre exported it from a hidden layer.
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "s",
+          type: "symbol",
+          "source-layer": "x",
+          layout: { visibility: "none", "text-field": ["get", "name"] },
+        },
+        { id: "f", type: "fill", "source-layer": "x", paint: { "fill-color": "#00ff00" } },
+      ],
+    } as never);
+
+    assert.equal(style.labels, null);
+  });
+
+  it("still imports labels from a hidden symbol layer", () => {
+    // GeoLibre's exporter stamps the whole layer's `visible` flag onto every layer it emits, so
+    // reading it as class state would switch labels off when re-importing an export taken from a
+    // hidden layer.
+    const result = read([
+      {
+        id: "s",
+        type: "symbol",
+        "source-layer": "f",
+        layout: { visibility: "none", "text-field": ["get", "name"] },
+        paint: { "text-color": "#111111" },
+      },
+    ]);
+
+    assert.equal(result.labels.enabled, true);
+    assert.equal(result.labels.field, "name");
+  });
+  // The contest is not only over which branch runs. Everything else a layer contributes is shared:
+  // the colour renderer is claimed once, and stroke comes from whichever of line, fill outline or
+  // circle stroke speaks last. `speaking` drops a hidden layer from all of it at once.
+  const categorized = (a: string, b: string) => [
+    "match",
+    ["to-string", ["get", "k"]],
+    "a",
+    a,
+    "b",
+    b,
+    "#000000",
+  ];
+
+  it("lets a drawn line claim the renderer over a hidden fill", () => {
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "fill-color": categorized("#111111", "#222222") },
+      },
+      {
+        id: "l",
+        type: "line",
+        "source-layer": "x",
+        paint: { "line-color": categorized("#00ff00", "#00aa00") },
+      },
+    ]);
+
+    assert.deepEqual(
+      result.vectorStyleStops.map((stop) => stop.color),
+      ["#00ff00", "#00aa00"],
+      "the renderer comes from the layer somebody can see",
+    );
+  });
+
+  it("lets a drawn line claim the renderer over a hidden circle", () => {
+    // The line branch defers to a circle, because line-color's fallback is the stroke and a point
+    // export needs the circle's fallback in fillColor. A hidden circle has no claim to defer to.
+    const result = read([
+      {
+        id: "c",
+        type: "circle",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "circle-color": "#111111" },
+      },
+      {
+        id: "l",
+        type: "line",
+        "source-layer": "x",
+        paint: { "line-color": categorized("#00ff00", "#00aa00") },
+      },
+    ]);
+
+    assert.equal(result.vectorStyleMode, "categorized");
+  });
+
+  it("does not let a hidden line take the stroke from a drawn fill", () => {
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        paint: { "fill-color": "#00ff00", "fill-outline-color": "#00aa00" },
+      },
+      {
+        id: "l",
+        type: "line",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "line-color": "#ff0000", "line-width": 9 },
+      },
+    ]);
+
+    assert.equal(result.strokeColor, "#00aa00", "the fill's own outline survives");
+    assert.notEqual(result.strokeWidth, 9, "and so does its width");
+  });
+
+  it("still reads a style whose every layer is hidden", () => {
+    // Nothing drawn is contesting anything, so the old precedence stands and the style still
+    // imports rather than coming back empty.
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "fill-color": categorized("#111111", "#222222") },
+      },
+      {
+        id: "l",
+        type: "line",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "line-color": "#ff0000" },
+      },
+    ]);
+
+    assert.equal(result.vectorStyleMode, "categorized");
+    assert.equal(result.strokeColor, "#ff0000");
+  });
+  // The contest is not only over the renderer and the stroke. A hidden layer stops being a
+  // candidate outright, so it cannot reach opacity, width, or the extrusion flag either.
+  it("does not let a hidden extrusion extrude a layer a drawn line describes", () => {
+    const result = read([
+      {
+        id: "e",
+        type: "fill-extrusion",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "fill-extrusion-height": 10 },
+      },
+      { id: "l", type: "line", "source-layer": "x", paint: { "line-color": "#00ff00" } },
+    ]);
+
+    assert.equal(result.extrusionEnabled, DEFAULT_LAYER_STYLE.extrusionEnabled);
+  });
+
+  it("does not take stroke width from a hidden circle", () => {
+    const result = read([
+      {
+        id: "c",
+        type: "circle",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "circle-stroke-color": "#ff0000", "circle-stroke-width": 7 },
+      },
+      {
+        id: "l",
+        type: "line",
+        "source-layer": "x",
+        paint: { "line-color": "#00ff00", "line-width": 2 },
+      },
+    ]);
+
+    assert.equal(result.strokeWidth, 2, "the drawn line's width, not the hidden circle's");
+  });
+
+  it("does not take opacity from a hidden fill", () => {
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "fill-color": "#111111", "fill-opacity": 0.1 },
+      },
+      { id: "l", type: "line", "source-layer": "x", paint: { "line-color": "#00ff00" } },
+    ]);
+
+    assert.equal(result.fillOpacity, DEFAULT_LAYER_STYLE.fillOpacity);
+  });
+  it("does not take the stroke from a hidden fill's outline", () => {
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        layout: { visibility: "none" },
+        paint: { "fill-color": "#111111", "fill-outline-color": "#ff0000" },
+      },
+      { id: "c", type: "circle", "source-layer": "x", paint: { "circle-color": "#00ff00" } },
+    ]);
+
+    assert.equal(result.strokeColor, DEFAULT_LAYER_STYLE.strokeColor);
+  });
+
+  it("still takes the stroke from a drawn fill's outline", () => {
+    const result = read([
+      {
+        id: "f",
+        type: "fill",
+        "source-layer": "x",
+        paint: { "fill-color": "#111111", "fill-outline-color": "#ff0000" },
+      },
+      { id: "c", type: "circle", "source-layer": "x", paint: { "circle-color": "#00ff00" } },
+    ]);
+
+    assert.equal(result.strokeColor, "#ff0000");
+  });
+  it("says so when a lone hidden layer of a type is dropped", () => {
+    // The stack diagnostics below only fire for two or more layers of a type, so without this a
+    // single hidden extrusion beside a drawn fill went unimported and unmentioned.
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "e",
+          type: "fill-extrusion",
+          "source-layer": "x",
+          layout: { visibility: "none" },
+          paint: { "fill-extrusion-height": 10 },
+        },
+        { id: "f", type: "fill", "source-layer": "x", paint: { "fill-color": "#00ff00" } },
+      ],
+    } as never);
+
+    assert.deepEqual(style.warnings, [
+      "The style's fill-extrusion layer is hidden; it was not imported.",
+    ]);
+  });
+
+  it("says so when a hidden heatmap is dropped for a drawn circle", () => {
+    // `heatmap` reaches the point renderer, so it needs the same report as the other types. It was
+    // missing from the diagnostic list entirely.
+    const style = parseMapboxStyle({
+      layers: [
+        { id: "h", type: "heatmap", "source-layer": "x", layout: { visibility: "none" } },
+        { id: "c", type: "circle", "source-layer": "x", paint: { "circle-color": "#00ff00" } },
+      ],
+    } as never);
+
+    assert.deepEqual(style.warnings, ["The style's heatmap layer is hidden; it was not imported."]);
+  });
+
+  it("says nothing about a drawn symbol layer", () => {
+    // The diagnostic reads a type missing from its lookup as "stands aside", so a drawn symbol
+    // layer has to be listed there or every label import reports itself hidden.
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "s",
+          type: "symbol",
+          "source-layer": "x",
+          layout: { "text-field": ["get", "name"] },
+          paint: { "text-color": "#111111" },
+        },
+      ],
+    } as never);
+
+    assert.deepEqual(style.warnings, []);
+    assert.equal(style.labels?.enabled, true);
+  });
+
+  it("says nothing when the lone layer of a type is drawn", () => {
+    const style = parseMapboxStyle({
+      layers: [{ id: "f", type: "fill", "source-layer": "x", paint: { "fill-color": "#111111" } }],
+    } as never);
+
+    assert.deepEqual(style.warnings, []);
+  });
+
+  it("does not call the layer drawn when every layer in the style is hidden", () => {
+    // Nothing is drawn anywhere, so nothing stands aside and a hidden line still speaks. The
+    // report must not then claim the layer it picked was drawn.
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "a",
+          type: "line",
+          "source-layer": "f",
+          layout: { visibility: "none" },
+          paint: { "line-color": "#00ff00" },
+        },
+        {
+          id: "b",
+          type: "line",
+          "source-layer": "f",
+          layout: { visibility: "none" },
+          paint: { "line-color": ["get", "colour"] },
+        },
+      ],
+    } as never);
+
+    assert.equal(style.style.strokeColor, "#00ff00");
+    assert.ok(
+      style.warnings.some((warning) =>
+        /multiple line layers, all hidden; only the bottom-most one was imported/.test(warning),
+      ),
+      `got: ${style.warnings.join(" ")}`,
+    );
+    assert.ok(
+      !style.warnings.some((warning) => /drawn layer was imported/.test(warning)),
+      `got: ${style.warnings.join(" ")}`,
+    );
+  });
+
+  it("says a type whose layers are all hidden was not imported", () => {
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "f1",
+          type: "fill",
+          "source-layer": "x",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#111111" },
+        },
+        {
+          id: "f2",
+          type: "fill",
+          "source-layer": "x",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#222222" },
+        },
+        { id: "l", type: "line", "source-layer": "x", paint: { "line-color": "#00ff00" } },
+      ],
+    } as never);
+
+    assert.ok(
+      style.warnings.some((warning) => /fill layers are all hidden/.test(warning)),
+      "none of them was imported, so the report must not say the first was",
+    );
+    assert.ok(
+      !style.warnings.some((warning) =>
+        /only the bottom-most drawn layer was imported/.test(warning),
+      ),
+      `got: ${style.warnings.join(" ")}`,
+    );
+  });
+  it("still takes a drawn circle's colour beside a flat extrusion colour", () => {
+    // A flat extrusion colour sets the mode but writes only `extrusionColor`. Claiming the
+    // renderer there would silently drop the circle's own colour, which this importer read on
+    // `main`.
+    const result = applyMapboxStyleImport(
+      DEFAULT_LAYER_STYLE,
+      parseMapboxStyle({
+        layers: [
+          {
+            id: "e",
+            type: "fill-extrusion",
+            "source-layer": "x",
+            paint: { "fill-extrusion-color": "#00ff00" },
+          },
+          { id: "c", type: "circle", "source-layer": "x", paint: { "circle-color": "#0000ff" } },
+        ],
+      } as never),
+    );
+
+    assert.equal(result.vectorStyleMode, "single");
+    assert.equal(result.extrusionColor, "#00ff00");
+    assert.equal(result.fillColor, "#0000ff", "the circle's colour, not the base style's");
+  });
+
+  // Importing over a layer that already has a renderer, rather than over the default style, is
+  // where a mode the importer forgot to set shows up.
+  it("replaces a categorized renderer with a flat extrusion colour", () => {
+    const base = {
+      ...DEFAULT_LAYER_STYLE,
+      vectorStyleMode: "categorized" as const,
+      vectorStyleProperty: "old",
+      vectorStyleStops: [{ value: "z", color: "#abcdef" }],
+    };
+    const result = applyMapboxStyleImport(
+      base,
+      parseMapboxStyle({
+        layers: [
+          {
+            id: "e",
+            type: "fill-extrusion",
+            "source-layer": "x",
+            paint: { "fill-extrusion-color": "#00ff00" },
+          },
+        ],
+      } as never),
+    );
+
+    assert.equal(result.vectorStyleMode, "single");
+    assert.equal(result.extrusionColor, "#00ff00");
+  });
+
+  it("leaves the renderer alone when an extrusion names no colour", () => {
+    const base = { ...DEFAULT_LAYER_STYLE, vectorStyleMode: "categorized" as const };
+    const result = applyMapboxStyleImport(
+      base,
+      parseMapboxStyle({
+        layers: [
+          {
+            id: "e",
+            type: "fill-extrusion",
+            "source-layer": "x",
+            paint: { "fill-extrusion-height": 10 },
+          },
+        ],
+      } as never),
+    );
+
+    assert.equal(result.vectorStyleMode, "categorized", "the style said nothing about colour");
+  });
+
+  it("does not report an all-hidden stack as combined into rules", () => {
+    const style = parseMapboxStyle({
+      layers: [
+        {
+          id: "a",
+          type: "fill",
+          "source-layer": "f",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#111111" },
+          filter: ["==", ["get", "c"], "a"],
+        },
+        {
+          id: "b",
+          type: "fill",
+          "source-layer": "f",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#222222" },
+          filter: ["==", ["get", "c"], "b"],
+        },
+      ],
+    } as never);
+
+    assert.equal(style.style.vectorStyleMode, "single");
+    assert.equal(style.style.vectorRules, undefined, "a flat colour is not a set of rules");
+    assert.equal(style.matchedLayerCount, 1, "one layer's worth of symbology was taken");
+    assert.deepEqual(style.warnings, [
+      "The style has multiple fill layers, all hidden; only the bottom-most one was imported.",
+    ]);
+  });
+
+  it("replaces a categorized renderer when every hidden class omits its colour", () => {
+    // Declining the stack outright used to throw away the spec default this path had already
+    // resolved, leaving the old renderer in place through an import that replaces it.
+    const base = {
+      ...DEFAULT_LAYER_STYLE,
+      vectorStyleMode: "categorized" as const,
+      vectorStyleProperty: "old",
+      vectorStyleStops: [{ value: "z", color: "#abcdef" }],
+    };
+    const result = applyMapboxStyleImport(
+      base,
+      parseMapboxStyle({
+        layers: [
+          {
+            id: "a",
+            type: "line",
+            "source-layer": "f",
+            layout: { visibility: "none" },
+            paint: { "line-width": 2 },
+            filter: ["==", ["get", "c"], "a"],
+          },
+          {
+            id: "b",
+            type: "line",
+            "source-layer": "f",
+            layout: { visibility: "none" },
+            paint: { "line-width": 3 },
+            filter: ["==", ["get", "c"], "b"],
+          },
+        ],
+      } as never),
+    );
+
+    assert.equal(result.vectorStyleMode, "single");
+  });
+
+  it("replaces a categorized renderer when every line class is hidden", () => {
+    const base = {
+      ...DEFAULT_LAYER_STYLE,
+      vectorStyleMode: "categorized" as const,
+      vectorStyleProperty: "old",
+      vectorStyleStops: [{ value: "z", color: "#abcdef" }],
+    };
+    const result = applyMapboxStyleImport(
+      base,
+      parseMapboxStyle({
+        layers: [
+          {
+            id: "a",
+            type: "line",
+            "source-layer": "f",
+            layout: { visibility: "none" },
+            paint: { "line-color": "#00ff00" },
+            filter: ["==", ["get", "c"], "a"],
+          },
+          {
+            id: "b",
+            type: "line",
+            "source-layer": "f",
+            layout: { visibility: "none" },
+            paint: { "line-color": "#e60000" },
+            filter: ["==", ["get", "c"], "b"],
+          },
+        ],
+      } as never),
+    );
+
+    assert.equal(
+      result.vectorStyleMode,
+      "single",
+      "the style describes one flat colour, so the old renderer must not survive it",
     );
   });
 });

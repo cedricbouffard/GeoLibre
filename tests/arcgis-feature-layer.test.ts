@@ -1192,3 +1192,39 @@ describe("addArcGISLayer (feature layer)", () => {
     );
   });
 });
+
+it("keeps pending viewport edits and their baseline when the map moves", async () => {
+  useAppStore.setState({ layers: [] });
+  const viewport = fakeViewportMap([-160, 18, -154, 23]);
+  let queries = 0;
+  setArcGISFetch(async (input) => {
+    if (String(input).includes("/query")) {
+      queries++;
+      return Response.json({ type: "FeatureCollection", features: [viewportFeature(1)] });
+    }
+    return Response.json(VIEWPORT_LAYER_INFO);
+  });
+  try {
+    const id = await addArcGISLayer(
+      { getMap: () => viewport.map, fitBounds() {} } as unknown as GeoLibreAppAPI,
+      { layerType: "feature", sourceType: "url", url: SERVICE_URL, maxFeatures: 1 },
+    );
+    await settle();
+    const before = useAppStore.getState().layers.find((l) => l.id === id)!;
+    const edited = structuredClone(before.geojson!);
+    edited.features[0].properties!.NAME = "Pending";
+    useAppStore.getState().updateLayer(id, { geojson: edited });
+    const requestsBeforePan = queries;
+    viewport.setBounds([10, 20, 15, 25]);
+    viewport.listeners.get("moveend")!();
+    await settle();
+    assert.equal(queries, requestsBeforePan);
+    const after = useAppStore.getState().layers.find((l) => l.id === id)!;
+    assert.deepEqual(after.geojson, edited);
+    assert.deepEqual(after.metadata.arcgisEditBaseline, before.metadata.arcgisEditBaseline);
+    assert.deepEqual(await reloadArcGISViewportLayer(id), edited);
+  } finally {
+    useAppStore.setState({ layers: [] });
+    setArcGISFetch(null);
+  }
+});

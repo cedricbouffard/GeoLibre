@@ -1,4 +1,5 @@
 import {
+  localFileName,
   batchDecodePolylines,
   hasPathTraversal,
   isAbsoluteFilesystemPath,
@@ -87,7 +88,7 @@ import { tiffBytesToPngBytes } from "./tiff-image";
 export { isTauri };
 
 function browserSafeFileName(path: string): string {
-  return path.split(/[/\\]/).pop() || "project.geolibre";
+  return localFileName(path) || "project.geolibre";
 }
 
 export type { FileDialogFilter } from "./file-dialog-filters";
@@ -3446,7 +3447,7 @@ export interface DroppedRaster {
 }
 
 function fileBaseName(path: string): string {
-  return path.split(/[\\/]/).pop() || path;
+  return localFileName(path) || path;
 }
 
 /** Collect dropped browser File objects that are rasters the map can load. */

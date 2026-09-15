@@ -3189,6 +3189,25 @@ body,
   outline: none;
 }
 
+/* mapbox-gl sizes its native control buttons (fullscreen, navigation,
+   geolocate) at 32px, while MapLibre's are 29px. On a Mapbox pane those sit in
+   one stack with the shared MapLibre-classed controls (compass, globe, layer
+   control), so bring the native ones down to the same size as the rest of the
+   cluster. The icons are centered background images, so they simply recenter. */
+.mapboxgl-map .mapboxgl-ctrl-group button {
+  height: 29px;
+  width: 29px;
+}
+
+/* These shared controls retain MapLibre class names when mounted in Mapbox.
+   Match the native top-left control spacing so their button-anchored panels
+   also clear the map edges and the Layers sidebar. */
+.mapboxgl-ctrl-top-left
+  > :is(.geolibre-vector-control, .geolibre-raster-control, .basemap-control) {
+  margin: 10px 0 0 10px;
+  float: left;
+}
+
 /* maplibre-gl-raster themes its panel from prefers-color-scheme (the OS
    setting), while GeoLibre themes from the .dark class on <html>. All of
    the panel's colors flow through --mlr-* custom properties, so remapping

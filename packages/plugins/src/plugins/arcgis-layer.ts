@@ -5,6 +5,16 @@ import type { HostedLayer, VectorTileLayer } from "@esri/maplibre-arcgis";
 import type { Feature, FeatureCollection, MultiPolygon, Position } from "geojson";
 import type * as maplibregl from "maplibre-gl";
 import type { GeoLibreAppAPI } from "../types";
+import {
+  arcGISEditCapabilities,
+  arcGISObjectId,
+  identifyArcGISFeatures,
+  planArcGISEdits,
+  reconcileArcGISRefresh,
+  sameArcGISFeatures,
+  type ArcGISEditInfo,
+} from "./arcgis-edits";
+import { getGeometryEditTargetLayerId } from "./maplibre-geo-editor";
 
 let arcGISFetchOverride: typeof globalThis.fetch | null = null;
 
@@ -167,7 +177,7 @@ export interface ArcGISLayerOptions {
   zoomTo?: boolean;
 }
 
-interface ArcGISFeatureLayerInfo {
+interface ArcGISFeatureLayerInfo extends ArcGISEditInfo {
   advancedQueryCapabilities?: {
     supportsOrderBy?: boolean;
     supportsPagination?: boolean;
@@ -309,18 +319,19 @@ export async function addArcGISLayer(
   }
 
   const map = app.getMap?.();
-  if (!map) {
-    throw new Error("The map is not ready.");
-  }
 
   const arcgis = await import("@esri/maplibre-arcgis");
   const hostedLayer = await createArcGISHostedLayer(arcgis, options, input);
   const id = createArcGISLayerId();
   const sourceIds = prefixArcGISSourceIds(hostedLayer, id);
-  const nativeLayerIds = prefixArcGISStyleLayerIds(hostedLayer, id);
+  // Snapshot the SDK style once it carries the prefixed source ids: the getters
+  // return fresh frozen copies on every read, so one snapshot feeds both the
+  // map and the store without assuming a stable order between reads.
+  const { sources, layers: styleLayers } = snapshotArcGISStyle(hostedLayer, id);
+  const nativeLayerIds = styleLayers.map((spec) => spec.id);
   const bounds = await resolveArcGISLayerBounds(input, options, hostedLayer);
 
-  addArcGISRuntimeLayerToMap(hostedLayer, map);
+  if (map) addArcGISRuntimeLayerToMap(sources, styleLayers, map);
   ensureArcGISStoreCleanup();
   arcgisLayerInstances.set(id, hostedLayer);
 
@@ -332,6 +343,10 @@ export async function addArcGISLayer(
     bounds,
     sourceIds,
   });
+  // Keep the resolved sources and style layers with the data so a second
+  // renderer (including the Cesium drape) can rebuild them without a control.
+  layer.source.arcgisSources = sources;
+  layer.source.arcgisLayers = styleLayers;
   const store = useAppStore.getState();
   store.addLayer(layer, options.beforeLayerId);
   if (bounds && options.zoomTo !== false) app.fitBounds?.(bounds);
@@ -451,25 +466,39 @@ function prefixArcGISSourceIds(hostedLayer: ArcGISRuntimeLayer, layerId: string)
   });
 }
 
-function prefixArcGISStyleLayerIds(hostedLayer: ArcGISRuntimeLayer, layerId: string): string[] {
-  const mutableLayers = hostedLayer.layers as maplibregl.LayerSpecification[];
-  return mutableLayers.map((styleLayer, index) => {
-    const nextLayerId = `${layerId}-layer-${index}-${sanitizeIdPart(styleLayer.id)}`;
-    styleLayer.id = nextLayerId;
-    return nextLayerId;
-  });
+function snapshotArcGISStyle(
+  hostedLayer: ArcGISRuntimeLayer,
+  layerId: string,
+): {
+  sources: Record<string, maplibregl.SourceSpecification>;
+  layers: maplibregl.LayerSpecification[];
+} {
+  // The SDK getters return frozen copies, so the prefixed ids go on our own
+  // mutable clone rather than back onto the runtime layer.
+  return {
+    sources: structuredClone(hostedLayer.sources),
+    layers: hostedLayer.layers.map((styleLayer, index) => ({
+      ...structuredClone(styleLayer),
+      id: `${layerId}-layer-${index}-${sanitizeIdPart(styleLayer.id)}`,
+    })),
+  };
 }
 
-function addArcGISRuntimeLayerToMap(hostedLayer: ArcGISRuntimeLayer, map: maplibregl.Map): void {
-  for (const [sourceId, source] of Object.entries(hostedLayer.sources)) {
+function addArcGISRuntimeLayerToMap(
+  sources: Record<string, maplibregl.SourceSpecification>,
+  layers: maplibregl.LayerSpecification[],
+  map: maplibregl.Map,
+): void {
+  // The map gets its own copies so it cannot mutate what the store persists.
+  for (const [sourceId, source] of Object.entries(sources)) {
     if (!map.getSource(sourceId)) {
-      map.addSource(sourceId, source);
+      map.addSource(sourceId, structuredClone(source));
     }
   }
 
-  for (const layer of hostedLayer.layers) {
-    if (!map.getLayer(layer.id)) {
-      map.addLayer(layer);
+  for (const spec of layers) {
+    if (!map.getLayer(spec.id)) {
+      map.addLayer(structuredClone(spec));
     }
   }
 }
@@ -522,7 +551,10 @@ async function addArcGISFeatureLayerAsGeoJson(
   // a complete download rather than a silently unfiltered viewport query.
   const initialData: FeatureCollection = map
     ? { type: "FeatureCollection", features: [] }
-    : await fetchArcGISFeaturePages(queryUrl, options, layerInfo);
+    : identifyArcGISFeatures(
+        await fetchArcGISFeaturePages(queryUrl, options, layerInfo),
+        layerInfo.objectIdField,
+      );
   // Add the layer before downloading features. Large services must not hold the
   // Add Data dialog open while hundreds of thousands of records are fetched.
   const id = store.addGeoJsonLayer(name, initialData, refreshUrl, options.beforeLayerId ?? null);
@@ -542,9 +574,16 @@ async function addArcGISFeatureLayerAsGeoJson(
       maxFeatures: options.maxFeatures,
       pageSize: options.pageSize,
     },
-    metadata: { sourceKind: ARCGIS_FEATURE_SOURCE_KIND, viewportLoading: Boolean(map) },
+    metadata: {
+      sourceKind: ARCGIS_FEATURE_SOURCE_KIND,
+      viewportLoading: Boolean(map),
+      arcgisEditBaseline: structuredClone(initialData),
+      arcgisEditInfo: layerInfo,
+    },
   });
 
+  arcgisEditOptions.set(id, { ...options, onProgress: undefined });
+  ensureArcGISFeatureLoaderCleanup();
   const bounds = arcgisExtentToBounds(layerInfo.extent);
   if (bounds && options.zoomTo !== false) app.fitBounds?.(bounds);
   if (map) startArcGISViewportLoader(id, map, queryUrl, options, () => Promise.resolve(layerInfo));
@@ -591,6 +630,7 @@ function startArcGISViewportLoader(
    * a layer that is perfectly healthy).
    */
   const load = async (): Promise<FeatureCollection> => {
+    if (arcGISLayerHasPendingEdits(layerId)) return currentArcGISLayerGeojson(layerId);
     abort?.abort();
     const controller = new AbortController();
     abort = controller;
@@ -626,11 +666,21 @@ function startArcGISViewportLoader(
     const publish = (): void => {
       if (
         sequence !== requestSequence ||
+        arcGISLayerHasPendingEdits(layerId) ||
         !useAppStore.getState().layers.some((l) => l.id === layerId)
       ) {
         return;
       }
-      useAppStore.getState().updateLayer(layerId, { geojson: collect() });
+      const data = identifyArcGISFeatures(collect(), layerInfo.objectIdField);
+      const current = useAppStore.getState().layers.find((l) => l.id === layerId)!;
+      useAppStore.getState().updateLayer(layerId, {
+        geojson: data,
+        metadata: {
+          ...current.metadata,
+          arcgisEditBaseline: structuredClone(data),
+          arcgisEditInfo: layerInfo,
+        },
+      });
       // Clear as soon as the service answers at all, not when the whole walk
       // finishes: a dense extent pages for tens of seconds, and leaving a stale
       // "zoom in" on screen while its features stream in reads as a live error.
@@ -671,9 +721,9 @@ function startArcGISViewportLoader(
     // One half failing still leaves the other's features on the map; the error
     // says the view is incomplete rather than pretending it is whole.
     const failed = results.find((result) => result.status === "rejected");
-    if (failed) throw failed.reason;
+    if (failed && !arcGISLayerHasPendingEdits(layerId)) throw failed.reason;
     reportArcGISViewportError(layerId, null);
-    return collect();
+    return currentArcGISLayerGeojson(layerId);
   };
 
   const move = (): void => {
@@ -785,10 +835,11 @@ export function restoreArcGISViewportLayers(app: GeoLibreAppAPI): void {
  */
 function ensureArcGISFeatureLoaderCleanup(): void {
   arcgisFeatureLoaderUnsubscribe ??= useAppStore.subscribe((state, previous) => {
-    if (arcgisFeatureLoaders.size === 0) return;
+    if (arcgisFeatureLoaders.size === 0 && arcgisEditOptions.size === 0) return;
     for (const layer of previous.layers) {
       if (!state.layers.some((current) => current.id === layer.id)) {
         stopArcGISViewportLoader(layer.id);
+        arcgisEditOptions.delete(layer.id);
       }
     }
   });
@@ -1351,12 +1402,16 @@ function arcgisTileScheme(info: ArcGISImageProducingServiceInfo): ArcGISTileSche
  * @returns The re-downloaded features.
  */
 export async function refreshArcGISFeatureLayer(params: {
+  layerId?: string;
   maxFeatures?: number;
   pageSize?: number;
   queryUrl: string;
 }): Promise<FeatureCollection> {
+  if (params.layerId && arcGISLayerHasPendingEdits(params.layerId))
+    return currentArcGISLayerGeojson(params.layerId);
   const queryUrl = trimTrailingSlash(params.queryUrl).replace(/\/query$/i, "");
   const options: ArcGISLayerOptions = {
+    ...(params.layerId ? arcgisEditOptions.get(params.layerId) : undefined),
     layerType: "feature",
     maxFeatures: params.maxFeatures,
     pageSize: params.pageSize,
@@ -1365,7 +1420,25 @@ export async function refreshArcGISFeatureLayer(params: {
   // Re-read the metadata rather than trusting a stored copy: `maxRecordCount`
   // and the paging capabilities are the service's to change between sessions.
   const layerInfo = await fetchArcGISJson<ArcGISFeatureLayerInfo>(queryUrl, options, undefined);
-  return fetchArcGISFeaturePages(`${queryUrl}/query`, options, layerInfo);
+  const data = identifyArcGISFeatures(
+    await fetchArcGISFeaturePages(`${queryUrl}/query`, options, layerInfo),
+    layerInfo.objectIdField,
+  );
+  if (params.layerId) {
+    if (arcGISLayerHasPendingEdits(params.layerId))
+      return currentArcGISLayerGeojson(params.layerId);
+    const layer = useAppStore.getState().layers.find((l) => l.id === params.layerId);
+    if (layer)
+      useAppStore.getState().updateLayer(layer.id, {
+        geojson: data,
+        metadata: {
+          ...layer.metadata,
+          arcgisEditInfo: layerInfo,
+          arcgisEditBaseline: structuredClone(data),
+        },
+      });
+  }
+  return data;
 }
 
 /**
@@ -2315,4 +2388,269 @@ function sanitizeIdPart(value: string): string {
 function createArcGISLayerId(): string {
   arcgisLayerSequence += 1;
   return `arcgis-layer-${arcgisLayerSequence}`;
+}
+
+// Credentials belong to the live connection, never to project metadata.
+const arcgisEditOptions = new Map<string, ArcGISLayerOptions>();
+const arcgisSavingLayers = new Set<string>();
+
+function arcGISBaseline(layer: GeoLibreLayer): FeatureCollection | undefined {
+  const value = layer.metadata.arcgisEditBaseline as FeatureCollection | undefined;
+  return value?.type === "FeatureCollection" && Array.isArray(value.features) ? value : undefined;
+}
+
+export function isArcGISWritableLayer(layer: GeoLibreLayer): boolean {
+  if (layer.metadata.sourceKind !== ARCGIS_FEATURE_SOURCE_KIND || !arcGISBaseline(layer))
+    return false;
+  const info = layer.metadata.arcgisEditInfo as ArcGISEditInfo | undefined;
+  if (!info) return false;
+  const caps = arcGISEditCapabilities(info);
+  return caps.create || caps.update || caps.delete;
+}
+
+/** Pause replacement downloads while edits are pending or an editor owns the features. */
+export function arcGISLayerHasPendingEdits(layerId: string): boolean {
+  const layer = useAppStore.getState().layers.find((l) => l.id === layerId);
+  if (!layer || layer.metadata.sourceKind !== ARCGIS_FEATURE_SOURCE_KIND) return false;
+  if (
+    arcgisSavingLayers.has(layerId) ||
+    layer.metadata.arcgisSaveUncertain === true ||
+    getGeometryEditTargetLayerId() === layerId
+  )
+    return true;
+  const baseline = arcGISBaseline(layer);
+  return Boolean(
+    baseline &&
+    layer.geojson &&
+    !sameArcGISFeatures(
+      baseline,
+      layer.geojson,
+      (layer.metadata.arcgisEditInfo as ArcGISEditInfo | undefined)?.objectIdField,
+    ),
+  );
+}
+
+/** Save one snapshot, retaining failed and concurrently changed features for the next save. */
+export async function saveArcGISLayerEdits(
+  layerId: string,
+): Promise<{ inserted: number; updated: number; deleted: number; errors: string[] }> {
+  if (arcgisSavingLayers.has(layerId)) throw new Error("An ArcGIS save is already in progress.");
+  if (getGeometryEditTargetLayerId() === layerId)
+    throw new Error("Finish editing geometry before saving to ArcGIS.");
+  const layer = useAppStore.getState().layers.find((l) => l.id === layerId);
+  if (!layer || !isArcGISWritableLayer(layer) || !layer.geojson)
+    throw new Error(
+      "This layer has no writable ArcGIS connection. Add the service again to establish one.",
+    );
+  if (layer.metadata.arcgisSaveUncertain === true)
+    throw new Error(
+      "The previous save could not be confirmed. Check the service and add the layer again before saving to avoid duplicate inserts.",
+    );
+  const queryUrl = layer.source.arcgisQueryUrl;
+  if (typeof queryUrl !== "string") throw new Error("Missing ArcGIS service URL.");
+  const layerUrl = trimTrailingSlash(queryUrl).replace(/\/query$/i, "");
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(layerUrl);
+  } catch {
+    throw new Error(
+      "Invalid ArcGIS service URL. Add the service again with a valid Feature Service URL.",
+    );
+  }
+  if (parsedUrl.protocol !== "https:") throw new Error("ArcGIS writes require HTTPS.");
+  const options = arcgisEditOptions.get(layerId) ?? { layerType: "feature", sourceType: "url" };
+  arcgisSavingLayers.add(layerId);
+  // Abort a page walk started before the save; late pages also check the lock.
+  arcgisFeatureLoaders.get(layerId)?.abort?.abort();
+  try {
+    const info = await fetchArcGISJson<ArcGISFeatureLayerInfo>(layerUrl, options, undefined);
+    const current = useAppStore.getState().layers.find((l) => l.id === layerId);
+    if (!current?.geojson) throw new Error("ArcGIS layer was removed.");
+    const baseline = arcGISBaseline(current)!;
+    const submitted: FeatureCollection = {
+      ...current.geojson,
+      features: current.geojson.features.map((f) =>
+        f.id === undefined && arcGISObjectId(f, info.objectIdField!) === undefined
+          ? { ...f, id: `arcgis-new-${crypto.randomUUID()}` }
+          : f,
+      ),
+    };
+    useAppStore.getState().updateLayer(layerId, { geojson: submitted });
+    const plan = planArcGISEdits(baseline, submitted, info);
+    const caps = current.capabilities;
+    if (
+      (plan.adds.length && caps?.create === false) ||
+      (plan.updates.length && caps?.update === false) ||
+      (plan.deletes.length && caps?.delete === false)
+    )
+      throw new Error("Layer permissions do not allow the requested edits.");
+    const result = { inserted: 0, updated: 0, deleted: 0, errors: [] as string[] };
+    if (!plan.adds.length && !plan.updates.length && !plan.deletes.length) return result;
+    const body = new URLSearchParams({
+      f: "json",
+      rollbackOnFailure: "false",
+      returnEditResults: "true",
+    });
+    if (options.token?.trim()) body.set("token", options.token.trim());
+    if (plan.adds.length) body.set("adds", JSON.stringify(plan.adds.map((e) => e.payload)));
+    if (plan.updates.length)
+      body.set("updates", JSON.stringify(plan.updates.map((e) => e.payload)));
+    if (plan.deletes.length) body.set("deletes", plan.deletes.join(","));
+    // Persist before dispatch. If the response is lost, a project reload must not retry inserts.
+    useAppStore
+      .getState()
+      .updateLayer(layerId, { metadata: { ...current.metadata, arcgisSaveUncertain: true } });
+    type EditResult = {
+      success?: boolean;
+      objectId?: number;
+      error?: { description?: string; code?: number };
+    };
+    let response: {
+      addResults?: EditResult[];
+      updateResults?: EditResult[];
+      deleteResults?: EditResult[];
+      error?: ArcGISErrorEnvelope;
+    };
+    try {
+      const http = await arcGISFetch(`${layerUrl}/applyEdits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        redirect: "error",
+      });
+      if (!http.ok) throw new Error(`HTTP ${http.status}`);
+      response = await http.json();
+      if (response.error) {
+        const latest = useAppStore.getState().layers.find((l) => l.id === layerId);
+        if (latest)
+          useAppStore
+            .getState()
+            .updateLayer(layerId, { metadata: { ...latest.metadata, arcgisSaveUncertain: false } });
+        throw new Error(arcgisErrorMessage(response.error, "ArcGIS rejected the edits."));
+      }
+      for (const [entries, count] of [
+        [response.addResults, plan.adds.length],
+        [response.updateResults, plan.updates.length],
+        [response.deleteResults, plan.deletes.length],
+      ] as const) {
+        if (
+          (entries?.length ?? 0) !== count ||
+          entries?.some((e) => typeof e.success !== "boolean")
+        )
+          throw new Error("Incomplete ArcGIS edit results.");
+      }
+      if (
+        response.addResults?.some(
+          (e) => e.success && (!Number.isSafeInteger(e.objectId) || e.objectId! < 0),
+        )
+      )
+        throw new Error("ArcGIS did not return inserted object IDs.");
+    } catch (error) {
+      const uncertain = useAppStore.getState().layers.find((l) => l.id === layerId)
+        ?.metadata.arcgisSaveUncertain;
+      if (uncertain)
+        throw new Error(
+          "ArcGIS save could not be confirmed. Check the service and add the layer again before saving to avoid duplicate inserts.",
+          { cause: error },
+        );
+      throw error;
+    }
+    const latest = useAppStore.getState().layers.find((l) => l.id === layerId);
+    if (!latest?.geojson) return result;
+    const field = info.objectIdField!;
+    const nextBaseline = new Map(baseline.features.map((f) => [arcGISObjectId(f, field)!, f]));
+    let features = [...latest.geojson.features];
+    const saved = new Map<number, Feature>();
+    const failed = (entry: EditResult, operation: string, id: number): boolean => {
+      if (entry.success) return false;
+      result.errors.push(
+        `${operation} ${id}: ${entry.error?.description ?? `ArcGIS error ${entry.error?.code ?? "unknown"}`}`,
+      );
+      return true;
+    };
+    response.addResults?.forEach((entry, i) => {
+      if (failed(entry, "Add", i + 1)) return;
+      const edit = plan.adds[i];
+      const id = entry.objectId!;
+      const stored = { ...edit.feature, properties: { ...edit.feature.properties, [field]: id } };
+      nextBaseline.set(id, stored);
+      saved.set(id, stored);
+      features = features.map((f) =>
+        f === edit.feature || (edit.feature.id !== undefined && f.id === edit.feature.id)
+          ? { ...f, properties: { ...f.properties, [field]: id } }
+          : f,
+      );
+      result.inserted++;
+    });
+    response.updateResults?.forEach((entry, i) => {
+      const edit = plan.updates[i];
+      if (failed(entry, "Update", edit.objectId)) return;
+      nextBaseline.set(edit.objectId, edit.feature);
+      saved.set(edit.objectId, edit.feature);
+      result.updated++;
+    });
+    response.deleteResults?.forEach((entry, i) => {
+      const id = plan.deletes[i];
+      if (failed(entry, "Delete", id)) return;
+      nextBaseline.delete(id);
+      result.deleted++;
+    });
+    useAppStore.getState().updateLayer(layerId, {
+      geojson: { ...latest.geojson, features },
+      metadata: {
+        ...latest.metadata,
+        arcgisEditBaseline: structuredClone({
+          type: "FeatureCollection",
+          features: [...nextBaseline.values()],
+        }),
+        arcgisEditInfo: info,
+        arcgisSaveUncertain: false,
+      },
+    });
+    // Capture defaults and server-calculated fields, without overwriting edits made during the save.
+    if (saved.size) {
+      try {
+        const fresh = await fetchArcGISFeaturePages(
+          queryUrl,
+          { ...options, maxFeatures: undefined },
+          info,
+          { params: { objectIds: [...saved.keys()].join(",") } },
+        );
+        const now = useAppStore.getState().layers.find((l) => l.id === layerId);
+        if (now?.geojson) {
+          const refreshed = new Map(
+            fresh.features.map((f) => {
+              const id = arcGISObjectId(f, field)!;
+              // A new feature keeps its local identity after ArcGIS assigns its object ID.
+              return [id, { ...f, id: saved.get(id)?.id ?? f.id }];
+            }),
+          );
+          for (const [id, f] of refreshed) if (saved.has(id)) nextBaseline.set(id, f);
+          const reconciled = now.geojson.features.map((f) => {
+            const id = arcGISObjectId(f, field);
+            const prior = id === undefined ? undefined : saved.get(id);
+            const serverFeature = id === undefined ? undefined : refreshed.get(id);
+            return prior && serverFeature ? reconcileArcGISRefresh(f, prior, serverFeature) : f;
+          });
+          useAppStore.getState().updateLayer(layerId, {
+            geojson: { ...now.geojson, features: reconciled },
+            metadata: {
+              ...now.metadata,
+              arcgisEditBaseline: structuredClone({
+                type: "FeatureCollection",
+                features: [...nextBaseline.values()],
+              }),
+            },
+          });
+        }
+      } catch {
+        result.errors.push(
+          "Edits were saved, but server-calculated values could not be refreshed.",
+        );
+      }
+    }
+    return result;
+  } finally {
+    arcgisSavingLayers.delete(layerId);
+  }
 }

@@ -1,5 +1,5 @@
 // @refresh reset
-import { useAppStore, type GeoLibreLayer } from "@geolibre/core";
+import { localFileName, useAppStore, type GeoLibreLayer } from "@geolibre/core";
 import type { FeatureCollection } from "geojson";
 import type { MapDiagnosticEvent, MapEngine } from "@geolibre/map";
 import { getLayerBounds, MapCanvas, setExternalDeckLayerOrderHandler } from "@geolibre/map";
@@ -135,6 +135,7 @@ import { useGlobalRasterIdentify } from "../../hooks/useGlobalRasterIdentify";
 import { useNetcdfIdentify } from "../../hooks/useNetcdfIdentify";
 import { useTerrainRestore } from "../../hooks/useTerrainRestore";
 import { useCogSpectralIdentify } from "../../hooks/useCogSpectralIdentify";
+import { useRasterViewportStretch } from "../../hooks/useRasterViewportStretch";
 import {
   useAutoCollapsedPanel,
   useReplaceLayersPanelId,
@@ -161,6 +162,7 @@ import { MapContextMenu } from "./MapContextMenu";
 import { KnowledgeCardPanel, type KnowledgePlace } from "./KnowledgeCardPanel";
 import { KnowledgeCardConsentDialog } from "./KnowledgeCardConsentDialog";
 import { MapGrid } from "./MapGrid";
+import { PrimaryMapboxCanvas } from "./PrimaryMapboxCanvas";
 import { PrimaryCesiumCanvas } from "./PrimaryCesiumCanvas";
 import { RemoteCursorsOverlay } from "./RemoteCursorsOverlay";
 import { useCommandBridge } from "../../hooks/useCommandBridge";
@@ -522,7 +524,7 @@ function hasDroppedFiles(event: DragEvent<HTMLElement>): boolean {
 }
 
 function fileNameFromPath(path: string): string {
-  return path.split(/[/\\]/).pop() ?? path;
+  return localFileName(path);
 }
 
 function layerNameFromPath(path: string): string {
@@ -967,6 +969,7 @@ export function DesktopShell({
   useRasterIdentify();
   useNetcdfIdentify(mapControllerRef, mapReadyGeneration);
   useCogSpectralIdentify(mapControllerRef, mapReadyGeneration);
+  useRasterViewportStretch(mapControllerRef, mapReadyGeneration);
   useTerrainRestore(mapControllerRef, mapReadyGeneration, projectGeneration);
   const [layerPanelWidth, setLayerPanelWidth] = useState(initialSidePanelWidth);
   const [stylePanelWidth, setStylePanelWidth] = useState(initialSidePanelWidth);
@@ -1300,6 +1303,12 @@ export function DesktopShell({
     // The flight simulator holds a reference to the live map (and suspends its
     // interaction handlers while flying), so rebind it after a map re-init too.
     reattachFlightSimulator(appAPI);
+    // VectorControl has a Cesium bridge and must restore on either engine.
+    restoreVectorLayers(appAPI);
+    if (engine.kind === "mapbox") {
+      restoreThreeDTilesLayers(appAPI);
+      void restoreLidarLayers(appAPI).catch(console.error);
+    }
     if (!engine.capabilities.nativeMapInstance) {
       void restoreLocalFileLayers();
       return;
@@ -1307,7 +1316,6 @@ export function DesktopShell({
     restoreThreeDTilesLayers(appAPI);
     restoreRasterLayers(appAPI);
     restorePlanetaryComputerLayers(appAPI);
-    restoreVectorLayers(appAPI);
     // Re-bind saved ArcGIS feature layers to the viewport. Without this a
     // reopened project's layer stays frozen on the extent it was saved with.
     restoreArcGISViewportLayers(appAPI);
@@ -1377,7 +1385,7 @@ export function DesktopShell({
     externalPluginsReady,
     projectUrlLoadState?.status === "loading" || dataUrlLoadState?.status === "loading",
     projectUrlLoadState?.error ?? dataUrlLoadState?.error ?? null,
-    cesiumPrimary,
+    primaryRenderer !== "maplibre",
   );
   const setObjectDetectionOpen = useAppStore((s) => s.setObjectDetectionOpen);
   const setSegmentEverythingOpen = useAppStore((s) => s.setSegmentEverythingOpen);
@@ -1394,7 +1402,7 @@ export function DesktopShell({
   // globe and the panel springs back the moment the user returns to 2D, long
   // after they meant to dismiss it (#2217 review).
   useEffect(() => {
-    if (!cesiumPrimary) return;
+    if (primaryRenderer === "maplibre") return;
     // Bump the readiness generation on the hand-off. It is no longer *reset*
     // (that is what left every consumer pointing at nothing on the globe), but
     // the reset did do one useful thing: it forced the generation-gated effects
@@ -1409,7 +1417,7 @@ export function DesktopShell({
     setBasemapExtractOpen(false);
     setObjectDetectionOpen(false);
     setSegmentEverythingOpen(false);
-  }, [cesiumPrimary, setObjectDetectionOpen, setSegmentEverythingOpen]);
+  }, [primaryRenderer, setObjectDetectionOpen, setSegmentEverythingOpen]);
 
   // Keep the on-map compass (reset pitch/bearing) control's tooltip translated.
   // Re-runs when the controller (re)initialises (mapReadyGeneration) and on
@@ -2619,7 +2627,12 @@ export function DesktopShell({
                   where `PrimaryCesiumCanvas` explains the absence. Renderer-
                   neutral, store-driven overlays sit outside the branch and are
                   available under either engine. */}
-              {cesiumPrimary ? (
+              {primaryRenderer === "mapbox" ? (
+                <PrimaryMapboxCanvas
+                  engineRef={mapControllerRef}
+                  onEngineReady={handleMapControllerReady}
+                />
+              ) : cesiumPrimary ? (
                 <PrimaryCesiumCanvas
                   engineRef={mapControllerRef}
                   onEngineReady={handleMapControllerReady}
@@ -2746,7 +2759,7 @@ export function DesktopShell({
             displayName={t("shell.section.selectionPanels")}
           >
             <Suspense fallback={null}>
-              <SelectByExpressionDialog />
+              <SelectByExpressionDialog canEditLayer={collaboration.canEditLayer} />
             </Suspense>
             <Suspense fallback={null}>
               <SelectByLocationDialog />

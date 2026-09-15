@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Map as MapboxMap } from "mapbox-gl";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import {
   acquireMercatorProjectionLock,
@@ -162,4 +163,31 @@ describe("mercator projection lock", () => {
     assert.deepEqual(fake.setProjectionCalls, []);
     assert.equal(fake.projection, "globe");
   });
+});
+
+it("uses Mapbox's named projection API and keeps Mercator until both overlay holders release", () => {
+  let projection = "globe";
+  const map = {
+    getProjection: () => ({ name: projection }),
+    setProjection: (next: { name: string }) => {
+      projection = next.name;
+    },
+    once: () => {},
+  } as unknown as MapboxMap;
+  const app = {
+    getMapboxMap: () => map,
+    getMapProjection: () => projection as ProjectionType,
+    setMapProjection: (next: ProjectionType) => {
+      projection = next;
+    },
+  };
+  ensureMercatorProjection(map);
+  assert.equal(projection, "mercator");
+  projection = "globe";
+  acquireMercatorProjectionLock("test-mapbox-tiles", app);
+  acquireMercatorProjectionLock("test-mapbox-lidar", app);
+  releaseMercatorProjectionLock("test-mapbox-tiles", app);
+  assert.equal(projection, "mercator");
+  releaseMercatorProjectionLock("test-mapbox-lidar", app);
+  assert.equal(projection, "globe");
 });

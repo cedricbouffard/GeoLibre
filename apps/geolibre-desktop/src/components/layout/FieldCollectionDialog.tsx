@@ -46,6 +46,8 @@ import {
   appendFeature,
   buildGeometryFeature,
   buildPropertiesWithForm,
+  buildPhotoProperties,
+  type CollectionPhoto,
   buildSchema,
   collectionMetadata,
   type CollectionSchema,
@@ -59,7 +61,6 @@ import {
   MAX_PHOTO_BYTES,
   minVertices,
   parseOptions,
-  PHOTO_PROPERTY,
   resolveTargetLayer,
   validateForm,
   type Vertex,
@@ -185,7 +186,9 @@ export function FieldCollectionDialog({
   // Capture state. `pending` holds the captured coordinate(s) awaiting attributes.
   const [pending, setPending] = useState<Vertex[] | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
-  const [photo, setPhoto] = useState<string | null>(null);
+  const [photos, setPhotos] = useState<CollectionPhoto[]>([]);
+  // Count batches: separate file selections can read concurrently.
+  const [photoReads, setPhotoReads] = useState(0);
   const [picking, setPicking] = useState(false); // point: one-shot map click
   const [drawing, setDrawing] = useState(false); // line/polygon: multi-vertex
   const [vertices, setVertices] = useState<Vertex[]>([]);
@@ -218,7 +221,7 @@ export function FieldCollectionDialog({
   // rather than overwriting a newer capture.
   const gpsSeqRef = useRef(0);
   // Context generation: bumped only when the capture's *context* turns over —
-  // a different target layer, a different project, the dialog being dismissed.
+  // a different target layer/project, a saved capture, or an ended session.
   // Async work that belongs to the capture rather than to one placement (the
   // photo read) pins itself to this, so repositioning a point mid-read keeps
   // the photo instead of silently discarding it.
@@ -287,6 +290,7 @@ export function FieldCollectionDialog({
   const invalidateCapture = useCallback(() => {
     gpsSeqRef.current += 1;
     contextSeqRef.current += 1;
+    setPhotoReads(0);
   }, []);
 
   // Everything one capture owns: the placed geometry, the form, the photo, the
@@ -299,7 +303,7 @@ export function FieldCollectionDialog({
     invalidateCapture();
     setPending(null);
     setValues({});
-    setPhoto(null);
+    setPhotos([]);
     setPicking(false);
     setDrawing(false);
     setVertices([]);
@@ -478,7 +482,7 @@ export function FieldCollectionDialog({
   const hasWorkInProgress =
     pending !== null ||
     vertices.length > 0 ||
-    photo !== null ||
+    photos.length > 0 ||
     layerName.trim() !== "" ||
     drafts.some((d) => d.label.trim() !== "");
 
@@ -746,11 +750,11 @@ export function FieldCollectionDialog({
     [t, pushVertex, capturePoint, recenter],
   );
 
-  const handlePhoto = useCallback(
+  const handlePhotos = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
+      const files = Array.from(e.target.files ?? []);
       e.target.value = "";
-      if (!file) return;
+      if (files.length === 0) return;
       const tooLarge = () =>
         setNotice(
           t("fieldCollection.photoTooLarge", {
@@ -760,7 +764,7 @@ export function FieldCollectionDialog({
       // Fast-reject before reading: the stored value is a base64 data URL (~4/3
       // the file size), so a file already over the cap can't fit. The exact
       // check is on the encoded length below.
-      if (file.size > MAX_PHOTO_BYTES) {
+      if (files.some((file) => file.size > MAX_PHOTO_BYTES)) {
         tooLarge();
         return;
       }
@@ -770,26 +774,36 @@ export function FieldCollectionDialog({
       // sequence: repositioning the point or adding a vertex stays inside the
       // same capture and must not throw the photo away.
       const seq = contextSeqRef.current;
-      const stale = () => contextSeqRef.current !== seq;
-      const reader = new FileReader();
-      reader.onerror = () => {
-        if (!stale()) setNotice(t("fieldCollection.photoReadError"));
-      };
-      reader.onload = () => {
-        if (stale()) return;
-        const dataUrl = typeof reader.result === "string" ? reader.result : "";
-        if (!dataUrl) {
-          setNotice(t("fieldCollection.photoReadError"));
-          return;
-        }
-        if (dataUrl.length > MAX_PHOTO_BYTES) {
-          tooLarge();
-          return;
-        }
-        setPhoto(dataUrl);
-        setNotice(null);
-      };
-      reader.readAsDataURL(file);
+      setPhotoReads((count) => count + 1);
+      Promise.all(
+        files.map(
+          (file) =>
+            new Promise<CollectionPhoto>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onerror = reject;
+              reader.onload = () => {
+                const src = typeof reader.result === "string" ? reader.result : "";
+                if (!src) reject(new Error("empty photo"));
+                else if (src.length > MAX_PHOTO_BYTES) reject(new RangeError());
+                else resolve({ src, name: file.name });
+              };
+              reader.readAsDataURL(file);
+            }),
+        ),
+      )
+        .then((next) => {
+          if (contextSeqRef.current !== seq) return;
+          setPhotos((current) => [...current, ...next]);
+          setNotice(null);
+        })
+        .catch((error) => {
+          if (contextSeqRef.current !== seq) return;
+          if (error instanceof RangeError) tooLarge();
+          else setNotice(t("fieldCollection.photoReadError"));
+        })
+        .finally(() => {
+          if (contextSeqRef.current === seq) setPhotoReads((count) => count - 1);
+        });
     },
     [t],
   );
@@ -816,7 +830,7 @@ export function FieldCollectionDialog({
   }, [drafts, layerName, geometry, addGeoJsonLayer, updateLayer, t]);
 
   const handleSave = useCallback(() => {
-    if (!activeLayer || !schema || !pending) return;
+    if (!activeLayer || !schema || !pending || photoReads > 0) return;
     // Fields hidden by a visibility expression never block a save, so the
     // schema's own required/type checks run against the visible subset only.
     const candidate = buildPropertiesWithForm(schema, values, attributeForm);
@@ -837,9 +851,12 @@ export function FieldCollectionDialog({
       setErrors(mergedErrors);
       return;
     }
-    const extra: Record<string, unknown> = {};
-    if (photo) extra[PHOTO_PROPERTY] = photo;
-    const props = buildPropertiesWithForm(schema, values, attributeForm, extra);
+    const props = buildPropertiesWithForm(
+      schema,
+      values,
+      attributeForm,
+      buildPhotoProperties(photos),
+    );
     const feature = buildGeometryFeature(activeGeometry, pending, props);
 
     const current = useAppStore.getState().layers.find((l) => l.id === activeLayer.id);
@@ -859,6 +876,7 @@ export function FieldCollectionDialog({
         })
       : feature;
     updateLayer(activeLayer.id, { geojson: appendFeature(fc, tracked) });
+    invalidateCapture();
 
     savedCountRef.current += 1;
     setNotice(
@@ -868,9 +886,10 @@ export function FieldCollectionDialog({
       }),
     );
     setPending(null);
+    setLocating(false);
     setLastGpsFix(null);
     setValues({});
-    setPhoto(null);
+    setPhotos([]);
     setVertices([]);
     verticesRef.current = [];
     setErrors({});
@@ -881,7 +900,9 @@ export function FieldCollectionDialog({
     attributeForm,
     pending,
     values,
-    photo,
+    photos,
+    photoReads,
+    invalidateCapture,
     activeGeometry,
     updateLayer,
     t,
@@ -1026,9 +1047,12 @@ export function FieldCollectionDialog({
                   setValue={setValue}
                   errors={errors}
                   errorText={errorText}
-                  photo={photo}
-                  onPhoto={handlePhoto}
-                  onRemovePhoto={() => setPhoto(null)}
+                  photos={photos}
+                  readingPhotos={photoReads > 0}
+                  onPhotos={handlePhotos}
+                  onRemovePhoto={(index) =>
+                    setPhotos((current) => current.filter((_, i) => i !== index))
+                  }
                   locating={locating}
                   gpsFix={lastGpsFix}
                   onUseGps={() => handleUseGps(false)}
@@ -1298,9 +1322,10 @@ interface CaptureStepProps {
   setValue: (key: string, value: string) => void;
   errors: Record<string, string>;
   errorText: (code: string | undefined) => string | null;
-  photo: string | null;
-  onPhoto: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onRemovePhoto: () => void;
+  photos: CollectionPhoto[];
+  readingPhotos: boolean;
+  onPhotos: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemovePhoto: (index: number) => void;
   locating: boolean;
   gpsFix: GpsFix | null;
   onUseGps: () => void;
@@ -1318,8 +1343,9 @@ function CaptureStep({
   setValue,
   errors,
   errorText,
-  photo,
-  onPhoto,
+  photos,
+  readingPhotos,
+  onPhotos,
   onRemovePhoto,
   locating,
   gpsFix,
@@ -1477,49 +1503,56 @@ function CaptureStep({
           {/* Save sits above the optional photo so the primary action is
               reachable without scrolling past the upload, and the photo reads
               as the optional extra it is (#711). */}
-          <Button className="w-full" onClick={onSave}>
+          <Button className="w-full" onClick={onSave} disabled={readingPhotos}>
             <Save className="me-2 h-4 w-4" />
             {t(`fieldCollection.save.${geometry}`)}
           </Button>
 
           <div className="space-y-1.5">
             <Label htmlFor="fc-photo">{t("fieldCollection.photoOptional")}</Label>
-            {photo ? (
-              <div className="flex items-center gap-2">
-                <img
-                  src={photo}
-                  alt={t("fieldCollection.photo")}
-                  className="h-16 w-16 rounded-md object-cover"
-                />
-                <Button variant="ghost" size="sm" onClick={onRemovePhoto}>
-                  <X className="me-1 h-3.5 w-3.5" />
-                  {t("fieldCollection.removePhoto")}
-                </Button>
+            {photos.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {photos.map((photo, index) => (
+                  <div key={`${photo.src}-${index}`} className="relative">
+                    <img
+                      src={photo.src}
+                      alt={photo.name || t("fieldCollection.photo")}
+                      className="h-16 w-16 rounded-md object-cover"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="icon"
+                      className="absolute end-0 top-0 h-6 w-6"
+                      aria-label={`${t("fieldCollection.removePhoto")} (${index + 1}${photo.name ? `: ${photo.name}` : ""})`}
+                      onClick={() => onRemovePhoto(index)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
               </div>
-            ) : (
-              <>
-                {/* No `capture` attribute: let the user pick an existing photo
-                    or take a new one (capture="environment" forces the camera
-                    on iOS). Hidden; the button below is the visible trigger. */}
-                <input
-                  ref={photoInputRef}
-                  id="fc-photo"
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={onPhoto}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => photoInputRef.current?.click()}
-                >
-                  <ImagePlus className="me-2 h-4 w-4" />
-                  {t("fieldCollection.choosePhoto")}
-                </Button>
-              </>
             )}
+            {/* No `capture` attribute: let the user pick existing photos or take
+                a new one (capture="environment" forces the camera on iOS). */}
+            <input
+              ref={photoInputRef}
+              id="fc-photo"
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={onPhotos}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={() => photoInputRef.current?.click()}
+            >
+              <ImagePlus className="me-2 h-4 w-4" />
+              {t("fieldCollection.choosePhoto")}
+            </Button>
           </div>
         </>
       )}

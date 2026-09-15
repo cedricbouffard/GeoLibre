@@ -693,7 +693,7 @@ function scopeAppToPlugin(
   const activatePlugin = app.activatePlugin;
   const deactivatePlugin = app.deactivatePlugin;
   const hasAssistantRegistration = Boolean(
-    app.registerAssistantTool || app.registerAssistantToolSpec,
+    app.registerAssistantTool || app.registerAssistantToolSpec || app.registerAssistantGuidance,
   );
   if (
     !canAddControl &&
@@ -712,6 +712,7 @@ function scopeAppToPlugin(
     // it at all rather than handing back the host's unscoped implementation.
     delete scoped.registerAssistantTool;
     delete scoped.registerAssistantToolSpec;
+    delete scoped.registerAssistantGuidance;
   } else {
     const toolScope = getAssistantToolOwnerScope(pluginId);
     if (app.registerAssistantTool) {
@@ -723,6 +724,11 @@ function scopeAppToPlugin(
       const registerSpec = app.registerAssistantToolSpec;
       scoped.registerAssistantToolSpec = (spec) =>
         toolScope.active ? registerSpec(spec, pluginId) : () => {};
+    }
+    if (app.registerAssistantGuidance) {
+      const registerGuidance = app.registerAssistantGuidance;
+      scoped.registerAssistantGuidance = (text) =>
+        toolScope.active ? registerGuidance(text, pluginId) : () => {};
     }
   }
 

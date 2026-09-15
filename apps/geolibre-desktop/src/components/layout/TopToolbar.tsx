@@ -1,3 +1,4 @@
+import { supportsAddDataRenderer } from "../../lib/add-data-renderer";
 import {
   DEFAULT_PROJECT_NAME,
   excludeHiddenFieldsFromProject,
@@ -1154,7 +1155,12 @@ export function TopToolbar({
   const setSegmentEverythingOpen = useAppStore((s) => s.setSegmentEverythingOpen);
   // The globe owns the primary map, so the MapLibre-only entries below are dead
   // while it is active and the View menu becomes the only way back to 2D (#2217).
-  const cesiumPrimary = useAppStore((s) => s.primaryRenderer) === "cesium";
+  const primaryRenderer = useAppStore((s) => s.primaryRenderer);
+  // Mapbox publishes its engine only after the initial style loads. Before
+  // that, plugin panels cannot mount and their open requests would be lost.
+  // mapReadyGeneration rerenders this toolbar when the engine is published.
+  const addDataReady = primaryRenderer !== "mapbox" || mapControllerRef.current?.kind === "mapbox";
+  const cesiumPrimary = primaryRenderer === "cesium";
   const capabilities = useMapCapabilities(mapControllerRef);
   const setSqlWorkspaceOpen = useAppStore((s) => s.setSqlWorkspaceOpen);
   const setLoadEditorFeaturesOpen = useAppStore((s) => s.setLoadEditorFeaturesOpen);
@@ -2039,9 +2045,8 @@ export function TopToolbar({
         group: t("toolbar.commandGroup.plugins"),
         keywords: isActive(plugin.id) ? "plugin deactivate" : "plugin activate",
         disabledReason:
-          !isActive(plugin.id) &&
-          !isPluginEngineSupported(plugin, cesiumPrimary ? "cesium" : "maplibre")
-            ? t(cesiumPrimary ? "mapGrid.only2d" : "toolbar.item.rendererCesium")
+          !isActive(plugin.id) && !isPluginEngineSupported(plugin, primaryRenderer)
+            ? t("renderer.pluginUnsupported")
             : undefined,
         run: () => toggle(plugin.id, appApi),
       })),
@@ -2096,10 +2101,17 @@ export function TopToolbar({
   const allowedCommands = useMemo(
     () =>
       filterCommandsByPrivileges(
-        filterCommandsByCapabilities(commands, deploymentCapabilities),
+        filterCommandsByCapabilities(
+          commands.filter(
+            (command) =>
+              !command.id.startsWith("add.") ||
+              (addDataReady && supportsAddDataRenderer(command.id.slice(4), primaryRenderer)),
+          ),
+          deploymentCapabilities,
+        ),
         appPrivileges,
       ),
-    [commands, deploymentCapabilities, appPrivileges],
+    [commands, deploymentCapabilities, appPrivileges, primaryRenderer, addDataReady],
   );
   const shortcutCommands = useMemo(
     () =>
@@ -2182,13 +2194,13 @@ export function TopToolbar({
       {!viewer && isMenuVisible(uiProfile, "edit") && (
         <EditMenu chrome={chrome} mapControllerRef={mapControllerRef} />
       )}
-      {/* `|| cesiumPrimary`: an admin or custom profile can hide the whole "view"
-          menu via `hiddenMenus`, which ViewMenu's own item-level override cannot
-          defeat. Hiding it while a project opens with `primaryRenderer: "cesium"`
-          would strand the user on the globe with no path back to MapLibre, so
-          the menu stays mounted there and renders only the Rendering engine
-          submenu (#2217 review). */}
-      {(isMenuVisible(uiProfile, "view") || cesiumPrimary) && (
+      {/* `|| primaryRenderer !== "maplibre"`: an admin or custom profile can hide
+          the whole "view" menu via `hiddenMenus`, which ViewMenu's own item-level
+          override cannot defeat. Hiding it while a project opens on another
+          renderer (the Cesium globe or Mapbox) would strand the user there with
+          no path back to MapLibre, so the menu stays mounted and renders only
+          the Rendering engine submenu (#2217 review). */}
+      {(isMenuVisible(uiProfile, "view") || primaryRenderer !== "maplibre") && (
         <ViewMenu
           chrome={chrome}
           history={viewportHistory}
@@ -2247,6 +2259,7 @@ export function TopToolbar({
       />
       {!viewer && isMenuVisible(uiProfile, "addData") && deploymentCapabilities.has("data:add") && (
         <AddDataMenu
+          disabled={!addDataReady}
           chrome={chrome}
           addLayer={addLayer}
           osmPbfBusy={osmPbf.busy}

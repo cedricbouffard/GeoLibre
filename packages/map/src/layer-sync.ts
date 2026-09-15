@@ -1,5 +1,7 @@
+import { arcgisOpacity, arcgisVectorStyle } from "./arcgis-vector-style";
 import {
-  compileQuickFilters,
+  compileFeatureExpression,
+  compileLayerFilters,
   controlRendersLayer,
   DEFAULT_LAYER_STYLE,
   generatorCircleRadiusValue,
@@ -96,6 +98,8 @@ import {
   linePaint,
   rasterPaint,
 } from "./style-mapper";
+import { isViteDevServer, proxyWmsTileUrl, proxyWmsTiles } from "./wms-proxy";
+import { resolveTextFontFromStyleLayers } from "./text-font";
 
 /**
  * Notified of the computed `beforeId` for a deck.gl-backed external custom layer
@@ -115,7 +119,6 @@ export function setExternalDeckLayerOrderHandler(
   externalDeckLayerOrderHandler = handler;
 }
 
-const WMS_PROXY_PATH = "/__geolibre_wms_proxy";
 const PMTILES_PROTOCOL_GLOBAL_KEY = "__geolibrePMTilesProtocol";
 const PMTILES_ARCHIVE_KEYS_GLOBAL_KEY = "__geolibrePMTilesArchiveKeys";
 const MIN_LAYER_ZOOM = DEFAULT_LAYER_STYLE.minZoom;
@@ -169,9 +172,8 @@ function unclusteredPointFilter(hasTextMarkers: boolean): maplibregl.FilterSpeci
  * the transient {@link GeoLibreLayer.timeFilter} (a Time-Slider-bound layer
  * only renders features inside the current timeline window), the transient
  * {@link GeoLibreLayer.embedFilter} (the embed API's `setFilter`, set by the
- * host page that frames the app), the persisted
- * {@link GeoLibreLayer.quickFilters} compiled by `compileQuickFilters` (the
- * layer's own data-driven filter controls), and the rule-based visibility
+ * host page that frames the app), the persisted expression and Quick Filter
+ * controls compiled by `compileLayerFilters`, and the rule-based visibility
  * filter (a rule-based layer whose else rule is switched off hides features
  * matching no rule — see {@link ruleBasedVisibilityFilter}). They are combined
  * with `all`, so a host page's filter and a user's quick filter narrow the
@@ -185,13 +187,11 @@ function unclusteredPointFilter(hasTextMarkers: boolean): maplibregl.FilterSpeci
  * is active. Per-feature layers (fill, line, point, heatmap, text) filter
  * correctly.
  *
- * The corollary, shared by every filter in this set: MapLibre clusters at the
- * *source*, from the layer's raw features, and no layer filter can change what
- * a cluster already aggregated. So while a point layer renders as clusters, the
- * bubbles and their counts describe the unfiltered data even though the
- * unclustered points respect the filter. Filtering a clustered layer by its
- * individual features means either switching the renderer off clustering or
- * narrowing the source data itself, neither of which a per-feature filter does.
+ * MapLibre clusters at the source, before evaluating style-layer filters.
+ * {@link authoredClusterInput} therefore narrows clustered source data by the
+ * persisted expression and Quick Filters so hidden features do not contribute
+ * to bubbles or counts. Transient time, embed, and rule filters remain
+ * per-render-layer filters and cannot change an already-built cluster.
  *
  * Tile-backed layers (vector tiles, vector MBTiles) use this too. The filter is
  * an expression evaluated per feature as each tile decodes, so it needs no local
@@ -215,8 +215,8 @@ function withFeatureFilters(
   if (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) {
     filters.push(layer.embedFilter);
   }
-  const quickFilter = compileQuickFilters(layer.quickFilters);
-  if (quickFilter) filters.push(quickFilter);
+  const authoredFilter = compileLayerFilters(layer);
+  if (authoredFilter) filters.push(authoredFilter);
   const ruleFilter = ruleBasedVisibilityFilter(layer.style);
   if (ruleFilter) filters.push(ruleFilter);
   if (layer.metadata?.sourceKind === "annotation") {
@@ -239,6 +239,7 @@ function withFeatureFilters(
 interface NativeFilterState {
   base: maplibregl.FilterSpecification | null;
   appliedKey: string;
+  liveKey: string;
 }
 const externalNativeBaseFilters = new WeakMap<maplibregl.Map, Map<string, NativeFilterState>>();
 
@@ -269,8 +270,8 @@ function nativeLayerSupportsFilter(type: string): boolean {
 /**
  * The active per-feature filters GeoLibre applies on top of an external
  * layer's own filters: the transient Time-Slider window, the embed API's
- * host-set `setFilter` expression, the layer's compiled quick filters, and the
- * rule-based hide-unmatched filter (see {@link ruleBasedVisibilityFilter}).
+ * host-set `setFilter` expression, the layer's persisted authored filters, and
+ * the rule-based hide-unmatched filter (see {@link ruleBasedVisibilityFilter}).
  * Empty when none applies.
  */
 function externalFeatureFilterExtras(layer: GeoLibreLayer): unknown[] {
@@ -282,11 +283,40 @@ function externalFeatureFilterExtras(layer: GeoLibreLayer): unknown[] {
   if (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) {
     extras.push(layer.embedFilter);
   }
-  const quickFilter = compileQuickFilters(layer.quickFilters);
-  if (quickFilter) extras.push(quickFilter);
+  const authoredFilter = compileLayerFilters(layer);
+  if (authoredFilter) extras.push(authoredFilter);
   const ruleFilter = ruleBasedVisibilityFilter(layer.style);
   if (ruleFilter) extras.push(ruleFilter);
   return extras;
+}
+
+/**
+ * Whether some control-owned layer still has filters waiting for its native
+ * MapLibre layers to exist.
+ *
+ * A control creates its layers asynchronously — the Add Vector Layer restore
+ * replays a saved layer well after the sync pass that followed the project
+ * load — so {@link syncLayer} finds nothing on the map and skips the filter.
+ * The store layer it restores into usually matches what was saved, so no
+ * further store change arrives to trigger another sync, and a persisted layer
+ * filter would stay unapplied with the whole dataset on screen. Callers watch
+ * for the layers appearing and sync again.
+ *
+ * @param map - The map the control adds its native layers to.
+ * @param layers - The layers just synced.
+ * @returns True while some layer's filters have nowhere to be applied yet.
+ */
+export function hasPendingExternalNativeFilters(
+  map: maplibregl.Map,
+  layers: GeoLibreLayer[],
+): boolean {
+  return layers.some((layer) => {
+    if (layer.metadata?.externalNativeLayer !== true) return false;
+    const nativeLayerIds = layer.metadata?.nativeLayerIds;
+    if (!Array.isArray(nativeLayerIds) || nativeLayerIds.length === 0) return false;
+    if (externalFeatureFilterExtras(layer).length === 0) return false;
+    return nativeLayerIds.some((id) => typeof id === "string" && !map.getLayer(id));
+  });
 }
 
 /**
@@ -304,6 +334,17 @@ function combineExternalFilters(
     : extras.length === 1
       ? extras[0]
       : ["all", ...extras]) as unknown as maplibregl.FilterSpecification;
+}
+
+function nativeFilterFromMap(
+  map: maplibregl.Map,
+  nativeLayerId: string,
+): maplibregl.FilterSpecification | null {
+  return (map.getFilter(nativeLayerId) as maplibregl.FilterSpecification | undefined) ?? null;
+}
+
+function nativeFilterKey(filter: maplibregl.FilterSpecification | null): string {
+  return JSON.stringify(filter);
 }
 
 /**
@@ -339,19 +380,34 @@ function applyExternalNativeFeatureFilters(
     // tracking.
     const state = states.get(nativeLayerId);
     if (state) {
-      map.setFilter(nativeLayerId, state.base ?? undefined);
+      const liveFilter = nativeFilterFromMap(map, nativeLayerId);
+      const liveKey = nativeFilterKey(liveFilter);
+      // A control can remove and recreate a native layer under the same id.
+      // If that happened, its current filter is the new base and must not be
+      // replaced with the stale base captured from the previous layer.
+      if (state.liveKey === liveKey) {
+        map.setFilter(nativeLayerId, state.base ?? undefined);
+      }
       states.delete(nativeLayerId);
     }
     return;
   }
 
+  const liveFilter = nativeFilterFromMap(map, nativeLayerId);
+  const liveKey = nativeFilterKey(liveFilter);
   // Filters active: capture the control's base filter the first time, then
   // keep reusing it so repeated ticks combine rather than nest.
   let state = states.get(nativeLayerId);
   if (!state) {
-    const base = (map.getFilter(nativeLayerId) as maplibregl.FilterSpecification) ?? null;
-    state = { base, appliedKey: "" };
+    state = { base: liveFilter, appliedKey: "", liveKey };
     states.set(nativeLayerId, state);
+  } else if (state.liveKey !== liveKey) {
+    // Project restore and renderer changes recreate control-owned MapLibre
+    // layers without changing their ids. Treat the replacement's live filter
+    // as its new base, then apply the saved extras again.
+    state.base = liveFilter;
+    state.appliedKey = "";
+    state.liveKey = liveKey;
   }
   const combined = combineExternalFilters(state.base, extras)!;
   // Compare against the last filter we applied (not `getFilter`, which MapLibre
@@ -360,6 +416,7 @@ function applyExternalNativeFeatureFilters(
   if (state.appliedKey !== combinedKey) {
     map.setFilter(nativeLayerId, combined);
     state.appliedKey = combinedKey;
+    state.liveKey = nativeFilterKey(nativeFilterFromMap(map, nativeLayerId));
   }
 }
 
@@ -369,6 +426,91 @@ function applyExternalNativeFeatureFilters(
 // back to the full [0, 24] window.
 const managedZoomRangeLayerIds = new Set<string>();
 const geoJsonSourceData = new WeakMap<maplibregl.GeoJSONSource, GeoJSON>();
+const clusteredFilterInputs = new WeakMap<
+  GeoJSON.FeatureCollection,
+  { key: string; value: GeoJSON.FeatureCollection }
+>();
+
+/** Whether an expression reads `["zoom"]`, and so cannot be evaluated once. */
+function expressionUsesZoom(node: unknown): boolean {
+  if (!Array.isArray(node)) return false;
+  // `["literal", …]` wraps data, not operators, and a categorical Quick Filter
+  // compiles its selected values into one. A field value that happens to be
+  // the string "zoom" is not the zoom operator, so do not walk inside.
+  if (node[0] === "literal") return false;
+  // The operator takes no arguments; a longer array starting with "zoom" is a
+  // value list, not a call.
+  if (node[0] === "zoom" && node.length === 1) return true;
+  return node.some((entry) => expressionUsesZoom(entry));
+}
+
+/**
+ * Whether any layer needs its clustered source re-derived as the camera moves.
+ * Pre-filtering a clustered source is a one-shot evaluation, so a filter that
+ * reads `["zoom"]` only stays truthful if something re-runs it — see
+ * {@link authoredClusterInput}. Callers use this to decide whether a zoom
+ * listener is worth attaching at all; the ordinary layer pays nothing.
+ */
+export function hasZoomDependentClusterFilter(layers: GeoLibreLayer[]): boolean {
+  return layers.some((layer) => {
+    if (!layer.geojson) return false;
+    // Ask the cheap question first. `detectGeometryProfile` walks every feature
+    // and this runs on every sync pass, including ones with no filter in sight
+    // (a drag, an opacity nudge), so the scan is paid only by a layer that
+    // already carries a zoom-dependent authored filter.
+    const filter = compileLayerFilters(layer);
+    if (filter === null || !expressionUsesZoom(filter)) return false;
+    const { wantCluster } = resolveVectorRenderMode(layer, detectGeometryProfile(layer.geojson));
+    return wantCluster;
+  });
+}
+
+/** Whether two feature lists hold the same feature objects in the same order. */
+function sameFeatureList(left: GeoJSON.Feature[], right: GeoJSON.Feature[]): boolean {
+  return left.length === right.length && left.every((feature, index) => feature === right[index]);
+}
+
+/**
+ * Narrow a cluster renderer's source data by the layer's authored filters.
+ * MapLibre clusters before evaluating style-layer filters, so applying the
+ * expression only to the unclustered circle would leave hidden points in
+ * cluster bubbles and counts. Only the current filter's result is cached per
+ * source object, so ordinary sync ticks keep a stable data reference while
+ * iterating on a filter does not retain a copy of the dataset per attempt.
+ *
+ * Unlike a style-layer filter, which MapLibre re-evaluates against the live
+ * camera, this runs once per sync, so `zoom` is passed in and joined to the
+ * cache key. A zoom-dependent filter therefore needs a sync per zoom (see
+ * {@link hasZoomDependentClusterFilter}); when the outcome is unchanged the
+ * previous collection is returned so the source is not needlessly re-clustered.
+ */
+function authoredClusterInput(layer: GeoLibreLayer, zoom: number): GeoJSON.FeatureCollection {
+  const geojson = layer.geojson!;
+  const filter = compileLayerFilters(layer);
+  if (!filter) return geojson;
+
+  const source = JSON.stringify(filter);
+  const filterKey = expressionUsesZoom(filter) ? `${source}@${zoom}` : source;
+  const cached = clusteredFilterInputs.get(geojson);
+  if (cached?.key === filterKey) return cached.value;
+
+  const compiled = compileFeatureExpression(source, { expectedType: "boolean", zoom });
+  if (!compiled.ok || !compiled.evaluate) return geojson;
+  const evaluate = compiled.evaluate;
+  const features = geojson.features.filter((feature) => {
+    try {
+      return evaluate(feature) === true;
+    } catch {
+      return false;
+    }
+  });
+  // A zoom tick that changes nothing must not hand back a new object: the
+  // inline path would call setData and MapLibre would re-cluster from scratch.
+  const reused = cached && sameFeatureList(cached.value.features, features);
+  const filtered = reused ? cached.value : { ...geojson, features };
+  clusteredFilterInputs.set(geojson, { key: filterKey, value: filtered });
+  return filtered;
+}
 
 function rememberGeoJsonData(map: maplibregl.Map, sourceId: string, data: GeoJSON): void {
   const source = map.getSource(sourceId);
@@ -552,6 +694,28 @@ function syncExternalNativeLayer(
   beforeId?: string,
 ): void {
   const nativeLayerIds = getExternalNativeLayerIds(layer);
+  const arcgisStyle = arcgisVectorStyle(layer);
+  if (arcgisStyle) {
+    for (const [id, source] of Object.entries(arcgisStyle.sources)) {
+      if (!map.getSource(id)) map.addSource(id, structuredClone(source));
+    }
+    for (const spec of arcgisStyle.layers) {
+      if (!map.getLayer(spec.id)) map.addLayer(structuredClone(spec), beforeId);
+      const properties =
+        spec.type === "symbol"
+          ? ["text-opacity", "icon-opacity"]
+          : spec.type === "circle"
+            ? ["circle-opacity", "circle-stroke-opacity"]
+            : [`${spec.type}-opacity`];
+      const paint = spec.paint as Record<string, unknown> | undefined;
+      for (const property of properties) {
+        const opacity = arcgisOpacity(paint?.[property], layer.opacity);
+        if (!styleValuesEqual(getDynamicPaintProperty(map, spec.id, property), opacity)) {
+          setDynamicPaintProperty(map, spec.id, property, opacity);
+        }
+      }
+    }
+  }
   if (isPMTilesExternalLayer(layer)) {
     ensurePMTilesExternalLayer(map, layer, nativeLayerIds, beforeId);
   }
@@ -670,7 +834,7 @@ function syncExternalNativeLayer(
       applyExternalNativeFeatureFilters(map, nativeLayerId, layer);
     }
 
-    if (!controlOwnsPaint(layer)) {
+    if (!arcgisStyle && !controlOwnsPaint(layer)) {
       setExternalNativeLayerPaint(map, nativeLayerId, nativeLayer.type, layer);
     }
     // External layers carry their own zoom range from the control or tile
@@ -1821,6 +1985,7 @@ function syncGeoJsonLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: 
     layer,
     profile,
   );
+  const sourceGeoJson = wantCluster ? authoredClusterInput(layer, map.getZoom()) : layer.geojson!;
 
   // A layer can drop below the tiling threshold (e.g. a processing tool shrinks
   // it), or some other code may have left a non-geojson source under this id.
@@ -1857,7 +2022,7 @@ function syncGeoJsonLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: 
       wantCluster
         ? {
             type: "geojson",
-            data: layer.geojson!,
+            data: sourceGeoJson,
             cluster: true,
             clusterRadius,
             clusterMaxZoom,
@@ -1865,13 +2030,13 @@ function syncGeoJsonLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: 
           }
         : {
             type: "geojson",
-            data: layer.geojson!,
+            data: sourceGeoJson,
             ...(attribution ? { attribution } : {}),
           },
     );
-    rememberGeoJsonData(map, src, layer.geojson!);
+    rememberGeoJsonData(map, src, sourceGeoJson);
   } else {
-    setGeoJsonData(map.getSource(src) as maplibregl.GeoJSONSource, layer.geojson!);
+    setGeoJsonData(map.getSource(src) as maplibregl.GeoJSONSource, sourceGeoJson);
   }
 
   applyVectorDataRenderLayers(map, layer, src, profile, renderer, beforeId);
@@ -1891,13 +2056,14 @@ function syncGeoJsonVtLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?
     layer,
     profile,
   );
+  const sourceGeoJson = wantCluster ? authoredClusterInput(layer, map.getZoom()) : layer.geojson!;
 
   ensureGeoJsonVtProtocol();
 
   // (Re)build the tile index when the data or clustering config changed. A
   // rebuild also means cached tiles are stale, so drop the source to force
   // MapLibre to refetch them.
-  const rebuilt = registerGeoJsonVtSource(layer.id, layer.geojson!, {
+  const rebuilt = registerGeoJsonVtSource(layer.id, sourceGeoJson, {
     cluster: wantCluster,
     clusterRadius,
     clusterMaxZoom,
@@ -1964,7 +2130,7 @@ function applyVectorDataRenderLayers(
   const hasFeatureFilter =
     (Array.isArray(layer.timeFilter) && layer.timeFilter.length > 0) ||
     (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) ||
-    compileQuickFilters(layer.quickFilters) !== null ||
+    compileLayerFilters(layer) !== null ||
     ruleBasedVisibilityFilter(layer.style) !== null;
 
   if (profile.hasPolygon) {
@@ -2829,51 +2995,8 @@ function textFontForMapStyle(map: maplibregl.Map): string[] {
   return fonts;
 }
 
-// Operators that can start a data-driven text-font expression. A bare
-// ["get", "font"] is all strings, so an every(typeof === "string") check
-// alone would mistake it for a font stack.
-const FONT_EXPRESSION_OPERATORS = new Set([
-  "literal",
-  "get",
-  "has",
-  "at",
-  "in",
-  "case",
-  "match",
-  "coalesce",
-  "step",
-  "interpolate",
-  "let",
-  "var",
-  "concat",
-  "to-string",
-  "string",
-  "array",
-  "format",
-]);
-
 function resolveTextFontFromStyle(map: maplibregl.Map): string[] {
-  for (const styleLayer of map.getStyle().layers ?? []) {
-    if (styleLayer.type !== "symbol") continue;
-    // Icon-only symbol layers may carry a glyph/sprite font unsuited to text.
-    if (!styleLayer.layout?.["text-field"]) continue;
-    const textFont = styleLayer.layout?.["text-font"];
-    if (!Array.isArray(textFont)) continue;
-    // Unwrap the ["literal", ["Font A", "Font B"]] expression form used by
-    // many popular styles.
-    const fonts =
-      textFont[0] === "literal" && Array.isArray(textFont[1])
-        ? (textFont[1] as unknown[])
-        : (textFont as unknown[]);
-    if (
-      fonts.length > 0 &&
-      fonts.every((font) => typeof font === "string") &&
-      !FONT_EXPRESSION_OPERATORS.has(fonts[0] as string)
-    ) {
-      return fonts as string[];
-    }
-  }
-  return ["Noto Sans Regular"];
+  return resolveTextFontFromStyleLayers(map.getStyle().layers, ["Noto Sans Regular"]);
 }
 
 function syncRasterTileLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: string): void {
@@ -3017,27 +3140,7 @@ function syncImageLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: st
 }
 
 function getRenderableRasterTiles(layer: GeoLibreLayer): string[] {
-  const tiles = (layer.source.tiles as string[]) ?? [];
-  if (layer.type !== "wms" || !isViteDevServer()) return tiles;
-  return tiles.map((tile) => (/^https?:\/\//i.test(tile) ? proxyWmsTileUrl(tile) : tile));
-}
-
-function isViteDevServer(): boolean {
-  return Boolean(
-    (
-      import.meta as ImportMeta & {
-        env?: { DEV?: boolean };
-      }
-    ).env?.DEV,
-  );
-}
-
-function proxyWmsTileUrl(tileUrl: string): string {
-  const encodedUrl = encodeURIComponent(tileUrl).replaceAll(
-    "%7Bbbox-epsg-3857%7D",
-    "{bbox-epsg-3857}",
-  );
-  return `${WMS_PROXY_PATH}?url=${encodedUrl}`;
+  return proxyWmsTiles(layer.type, (layer.source.tiles as string[]) ?? []);
 }
 
 /** The parts of MapLibre's `VectorTileSource` this module reads and updates. */

@@ -267,7 +267,8 @@ m.set_renderer("cesium", pane_id=pane_id)
 assert m.get_renderer() == "cesium"
 ```
 
-Renderer choices are `"maplibre"` and `"cesium"`. Omitting `pane_id` targets the
+Renderer choices are `"maplibre"`, `"cesium"` and `"mapbox"` (Mapbox needs a
+Mapbox access token in the app's Settings; see `docs/mapbox-renderer.md`). Omitting `pane_id` targets the
 primary map. Grid dimensions are 1–4; `view_kinds` contains one renderer per
 pane, primary first. Existing pane IDs, cameras, and visibility overrides survive
 layout resizing. Save the project normally to preserve `primaryRenderer` and

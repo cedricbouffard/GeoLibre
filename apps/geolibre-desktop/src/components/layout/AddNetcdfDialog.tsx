@@ -163,6 +163,7 @@ interface AddNetcdfDialogProps {
 export function AddNetcdfDialog({ open, appApi, onOpenChange }: AddNetcdfDialogProps) {
   const { t } = useTranslation();
   const addImageOverlayLayer = useAppStore((state) => state.addImageOverlayLayer);
+  const mapbox = useAppStore((state) => state.primaryRenderer === "mapbox");
   // The same catalogue the Style panel's Raster symbology offers, so the choice
   // made here and the choice made after the fact are drawn from one list.
   const rampOptions = useColormapRamps();
@@ -233,7 +234,10 @@ export function AddNetcdfDialog({ open, appApi, onOpenChange }: AddNetcdfDialogP
   // `shift_x` uniform lookup throws on drivers that eliminate it (Mesa, so most
   // Linux Intel/AMD machines), leaving the layer permanently blank. See
   // composeColormappedImage.
-  const useImagePath = dataset !== null && !rgbMode && !hasTimeAxis;
+  // Mapbox can render a selected plane as an image, including a time slice,
+  // but cannot host the Zarr custom render pass used by animated cubes.
+  const useImagePath = dataset !== null && !rgbMode && (!hasTimeAxis || mapbox);
+  const unsupportedReference = mapbox && loadedRefs !== null && dataset === null;
 
   const closeOpenFile = () => {
     const open = openFileRef.current;
@@ -424,7 +428,7 @@ export function AddNetcdfDialog({ open, appApi, onOpenChange }: AddNetcdfDialogP
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!variable) return;
+    if (!variable || unsupportedReference) return;
     const gen = opGen.current;
     setError(null);
     setAdding(true);
@@ -825,6 +829,11 @@ export function AddNetcdfDialog({ open, appApi, onOpenChange }: AddNetcdfDialogP
           )}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
+          {unsupportedReference && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("renderer.layerMapboxUnsupported")}
+            </p>
+          )}
           {status && !error && <p className="text-sm text-muted-foreground">{status}</p>}
 
           <div className="flex justify-end gap-2">
@@ -838,7 +847,7 @@ export function AddNetcdfDialog({ open, appApi, onOpenChange }: AddNetcdfDialogP
             >
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={!variable || adding}>
+            <Button type="submit" disabled={!variable || adding || unsupportedReference}>
               {adding ? t("addData.netcdf.adding") : t("addData.netcdf.addLayer")}
             </Button>
           </div>

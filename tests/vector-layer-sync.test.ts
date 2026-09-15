@@ -14,7 +14,10 @@ import type {
   VectorLayerStyle,
 } from "maplibre-gl-vector";
 import { embedEditedGeometry } from "../apps/geolibre-desktop/src/lib/edited-geometry-save";
-import { replayVectorLayer } from "../packages/plugins/src/plugins/maplibre-vector";
+import {
+  preserveUnsavedVectorLayers,
+  replayVectorLayer,
+} from "../packages/plugins/src/plugins/maplibre-vector";
 import { STAC_ASSET_ACCESS_METADATA_KEY } from "../packages/plugins/src/plugins/stac-signing";
 import {
   createVectorStoreLayer,
@@ -133,6 +136,54 @@ describe("isEmbeddableLocalVectorLayer", () => {
     );
     const plainLayer = { ...layer, metadata: {} };
     assert.equal(isEmbeddableLocalVectorLayer(plainLayer), false);
+  });
+});
+
+describe("preserveUnsavedVectorLayers", () => {
+  afterEach(() => useAppStore.setState({ layers: [] }));
+
+  it("reads a browser-picked layer out of the departing control and skips the rest", async () => {
+    const collection = { type: "FeatureCollection" as const, features: [] };
+    const infos = [
+      vectorInfo({ id: "picked", source: { kind: "file", fileName: "picked.gpkg" } }),
+      vectorInfo({
+        id: "streamed",
+        source: { kind: "file", fileName: "streamed.parquet" },
+        ingestMode: "stream",
+      }),
+      vectorInfo({
+        id: "on-disk",
+        source: { kind: "file", fileName: "disk.gpkg", path: "/home/user/disk.gpkg" },
+      }),
+      vectorInfo({ id: "remote" }),
+    ];
+    useAppStore.setState({
+      layers: [
+        ...infos.map((info) => createVectorStoreLayer(info)),
+        {
+          ...createVectorStoreLayer(
+            vectorInfo({ id: "embedded", source: { kind: "file", fileName: "e.gpkg" } }),
+          ),
+          geojson: collection,
+        },
+        otherStoreLayer(),
+      ],
+    });
+    const read: string[] = [];
+    await preserveUnsavedVectorLayers({
+      getLayer: (id) => infos.find((info) => info.id === id),
+      getLayerGeoJSON: async (id) => {
+        read.push(id);
+        return collection;
+      },
+    });
+    assert.deepEqual(read, ["picked"]);
+    const byId = new Map(useAppStore.getState().layers.map((layer) => [layer.id, layer]));
+    assert.equal(byId.get("picked")?.geojson, collection);
+    assert.equal(byId.get("streamed")?.geojson, undefined);
+    assert.equal(byId.get("on-disk")?.geojson, undefined);
+    assert.equal(byId.get("remote")?.geojson, undefined);
+    assert.equal(byId.get("embedded")?.geojson, collection);
   });
 });
 

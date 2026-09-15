@@ -13,11 +13,11 @@ import { tool } from "@strands-agents/sdk";
 import type { FeatureCollection } from "geojson";
 import { z } from "zod";
 import { projectedGeoJsonCrs } from "../crs-utils";
-import { inferPropertyColumns } from "../pglite-sql";
 import { consoleDeps, runConsoleCode } from "../pyodide/pyodide-console";
-import { cleanStatement, maskSqlLiterals, previewLayerTables, runSqlQuery } from "../sql-workspace";
+import { cleanStatement, maskSqlLiterals, runSqlQuery } from "../sql-workspace";
 import { createXyzTileUrlTemplate } from "../xyz-url";
 import { findNamedTileBasemap, NAMED_TILE_BASEMAPS } from "./basemaps";
+import { describeLayers, summarizeLayers } from "./layer-summary";
 import { buildSymbologyStyle } from "./symbology";
 import { webSearch } from "./web-search";
 
@@ -38,16 +38,6 @@ export interface AssistantToolDeps {
     tool: "run_python" | "run_maplibre_js";
     code: string;
   }) => Promise<boolean>;
-}
-
-/** A short, model-facing description of one layer (no feature data leaked). */
-interface LayerSummary {
-  id: string;
-  name: string;
-  type: string;
-  geometryType: string | null;
-  featureCount: number;
-  fields: { name: string; type: string }[];
 }
 
 /**
@@ -207,56 +197,6 @@ function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
   return out;
 }
 
-/** Detect a layer's geometry family from its first feature. */
-function geometryTypeOf(layer: GeoLibreLayer): string | null {
-  return layer.geojson?.features?.[0]?.geometry?.type ?? null;
-}
-
-/** Summarize a layer's identity and schema without exposing row data. */
-function summarizeLayer(layer: GeoLibreLayer): LayerSummary {
-  const features = layer.geojson?.features ?? [];
-  return {
-    id: layer.id,
-    name: layer.name,
-    type: layer.type,
-    geometryType: geometryTypeOf(layer),
-    featureCount: features.length,
-    fields: features.length
-      ? inferPropertyColumns(features).map((column) => ({
-          name: column.name,
-          type: column.type,
-        }))
-      : [],
-  };
-}
-
-/**
- * Build a compact, model-facing description of the current layers and the SQL
- * table names they map to. Used to seed the agent's system prompt with names
- * and schemas only — never full datasets.
- */
-export function describeLayers(layers: GeoLibreLayer[]): string {
-  if (layers.length === 0) return "No layers are currently loaded.";
-  // previewLayerTables returns one entry per layer in order, so align by index —
-  // keying by name would collapse layers that share a name onto one table.
-  const tables = previewLayerTables(layers);
-  return layers
-    .map((layer, index) => {
-      const summary = summarizeLayer(layer);
-      const table = tables[index]?.tableName;
-      const fields = summary.fields.map((field) => `${field.name}:${field.type}`).join(", ");
-      return [
-        `- "${layer.name}" (${summary.type}`,
-        summary.geometryType ? `, ${summary.geometryType}` : "",
-        `, ${summary.featureCount} features`,
-        table ? `, SQL table ${table}` : "",
-        `)`,
-        fields ? ` fields: ${fields}` : "",
-      ].join("");
-    })
-    .join("\n");
-}
-
 /** Resolve a layer by id first, then case-insensitive name match. */
 function resolveLayer(reference: string): GeoLibreLayer | null {
   const layers = useAppStore.getState().layers;
@@ -378,9 +318,9 @@ export function createAssistantTools(deps: AssistantToolDeps): Tool[] {
   const listLayers = tool({
     name: "list_layers",
     description:
-      "List the layers currently loaded in the map, with their id, type, geometry, feature count, attribute field names, and the SQL table name to use in run_sql. Call this before referring to a layer.",
+      "List the layers currently loaded in the map, with their id, type, geometry, feature count, attribute field names, and the SQL table name (sqlTable) to use in run_sql; sqlTable is null for layers that cannot be queried. Call this before referring to a layer.",
     inputSchema: z.object({}),
-    callback: () => json({ layers: store().layers.map(summarizeLayer) }),
+    callback: () => json({ layers: summarizeLayers(store().layers) }),
   });
 
   const runSql = tool({
@@ -653,7 +593,7 @@ export function createAssistantTools(deps: AssistantToolDeps): Tool[] {
   const runPython = tool({
     name: "run_python",
     description:
-      "Run a Python snippet in the in-app Pyodide runtime for data/compute tasks (numpy, pandas, etc.). A `geolibre` object is in scope to drive the live map, e.g. `geolibre.get_center()` or `geolibre.add_geojson(name, data)`; `await geolibre.load_package('geopandas')` installs packages. Returns captured stdout and the repr of the last expression. The first call boots the Python runtime and can take several seconds. Prefer run_sql for querying layer attributes.",
+      "Run a Python snippet in the in-app Pyodide runtime for data/compute tasks (numpy, pandas, etc.). A `geolibre` object is in scope to drive the live map, e.g. `geolibre.get_center()` or `geolibre.add_geojson(data, name=\"Layer\")`; `await geolibre.load_package('geopandas')` installs packages. Returns captured stdout and the repr of the last expression. The first call boots the Python runtime and can take several seconds. Prefer run_sql for querying layer attributes.",
     inputSchema: z.object({
       code: z.string().describe("Python source to execute."),
     }),
@@ -710,7 +650,7 @@ export function createAssistantTools(deps: AssistantToolDeps): Tool[] {
   const applySymbology = tool({
     name: "apply_symbology",
     description:
-      "Color a vector layer by one of its attribute fields using a graduated (numeric) or categorized (text) color ramp. Use list_layers to find field names and color ramps like reds, blues, viridis.",
+      "Color a vector layer by one of its attribute fields using a graduated (numeric) or categorized (text) color ramp. Use list_layers to find field names and color ramps like reds, blues, viridis. For thresholds fixed by an external standard (air-quality bands, agency severity levels), pass `breaks` instead of class_count/scheme. Returns the stops actually applied, which can be fewer than the classes asked for.",
     inputSchema: z.object({
       layer: z.string().describe("Layer name or id."),
       property: z.string().describe("Attribute field to style by."),
@@ -718,6 +658,12 @@ export function createAssistantTools(deps: AssistantToolDeps): Tool[] {
       color_ramp: z.string().optional().describe("Color ramp id (e.g. reds, viridis)."),
       class_count: z.number().optional().describe("Number of classes for graduated mode."),
       scheme: z.enum(["equal-interval", "quantile"]).optional(),
+      breaks: z
+        .array(z.number())
+        .optional()
+        .describe(
+          "Explicit class lower bounds for graduated mode, e.g. [0, 25, 37, 50, 90]. Overrides class_count and scheme. Each value opens a class that runs up to the next one; the last class is open-ended above. At least two distinct values are required; past 12 the map still paints every break but the Style panel's class count reads 12.",
+        ),
     }),
     callback: (input) => {
       const layer = resolveLayer(input.layer);
@@ -728,13 +674,20 @@ export function createAssistantTools(deps: AssistantToolDeps): Tool[] {
         colorRamp: input.color_ramp,
         classCount: input.class_count,
         scheme: input.scheme,
+        breaks: input.breaks,
       });
       store().setLayerStyle(layer.id, style);
+      const stops = style.vectorStyleStops ?? [];
+      // Report the stops, not just how many there are: duplicate breaks collapse
+      // (see createGraduatedClassBreaks), so a request for 5 classes can land on
+      // 3, and explicit breaks are worth echoing back so the caller can confirm
+      // the thresholds that reached the map are the ones it asked for.
       return json({
         layerId: layer.id,
         mode: input.mode,
         property: input.property,
-        classes: style.vectorStyleStops?.length ?? 0,
+        classes: stops.length,
+        stops: stops.map((stop) => ({ value: stop.value, color: stop.color })),
       });
     },
   });

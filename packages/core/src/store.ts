@@ -1,3 +1,4 @@
+import { isSourceDerivedLayerName, uniqueImportedLayerName } from "./file-name";
 import type { FeatureCollection } from "geojson";
 import { v4 as uuidv4 } from "uuid";
 import { create } from "zustand";
@@ -220,6 +221,21 @@ export interface GpsStatusFix {
   speed: number | null;
   /** Fix time in epoch milliseconds. */
   timestamp: number;
+}
+
+/** An explicit background choice replaces the active renderer's override. */
+function preferencesForBasemap(state: AppState, ellipsoidId = state.preferences.map.ellipsoidId) {
+  const clearMapbox =
+    state.primaryRenderer === "mapbox" && state.preferences.map.mapboxStyleUrl !== undefined;
+  if (!clearMapbox && ellipsoidId === state.preferences.map.ellipsoidId) return state.preferences;
+  return {
+    ...state.preferences,
+    map: {
+      ...state.preferences.map,
+      ...(clearMapbox ? { mapboxStyleUrl: undefined } : {}),
+      ellipsoidId,
+    },
+  };
 }
 
 export interface AppState {
@@ -739,6 +755,8 @@ export interface AppState {
    * array to remove every control.
    */
   setLayerQuickFilters: (id: string, filters: LayerQuickFilter[]) => void;
+  /** Set or clear the project-persisted expression filter for a layer. */
+  setLayerFilterExpression: (id: string, expression: unknown[] | null) => void;
   reorderLayer: (id: string, direction: "up" | "down") => void;
   moveLayer: (id: string, targetIndex: number) => void;
   moveLayersRelative: (
@@ -1394,35 +1412,22 @@ export const useAppStore = create<AppState>()(
             isDirty: true,
           };
         }),
-      setBasemapStyleUrl: (url) => set({ basemapStyleUrl: url, isDirty: true }),
+      setBasemapStyleUrl: (url) =>
+        set((state) => ({
+          basemapStyleUrl: url,
+          preferences: preferencesForBasemap(state),
+          isDirty: true,
+        })),
       applyPlanetaryBasemap: (basemap) =>
         set((state) => ({
           basemapStyleUrl: basemap.styleUrl,
-          preferences:
-            state.preferences.map.ellipsoidId === basemap.ellipsoidId
-              ? state.preferences
-              : {
-                  ...state.preferences,
-                  map: {
-                    ...state.preferences.map,
-                    ellipsoidId: basemap.ellipsoidId,
-                  },
-                },
+          preferences: preferencesForBasemap(state, basemap.ellipsoidId),
           isDirty: true,
         })),
       restoreEarthBasemap: (styleUrl) =>
         set((state) => ({
           basemapStyleUrl: styleUrl,
-          preferences:
-            state.preferences.map.ellipsoidId === DEFAULT_ELLIPSOID_ID
-              ? state.preferences
-              : {
-                  ...state.preferences,
-                  map: {
-                    ...state.preferences.map,
-                    ellipsoidId: DEFAULT_ELLIPSOID_ID,
-                  },
-                },
+          preferences: preferencesForBasemap(state, DEFAULT_ELLIPSOID_ID),
           isDirty: true,
         })),
       setBasemapVisible: (visible) => set({ basemapVisible: visible, isDirty: true }),
@@ -1824,6 +1829,24 @@ export const useAppStore = create<AppState>()(
       addLayer: (layer, beforeLayerId = null) =>
         set((s) => {
           const layers = [...s.layers];
+          // Plugin source identifiers (for example pmtiles://) are not local files.
+          const { sourcePath } = layer;
+          const localSource =
+            sourcePath &&
+            (!/^[a-z][a-z0-9+.-]*:\/\//i.test(sourcePath) ||
+              /^(content|file):\/\//i.test(sourcePath));
+          // Only filename-derived names are deduplicated; an explicit name (an
+          // embedded document title, a tool output label, a user-typed name)
+          // is kept as supplied.
+          if (localSource && isSourceDerivedLayerName(layer.name, sourcePath)) {
+            layer = {
+              ...layer,
+              name: uniqueImportedLayerName(
+                layer.name,
+                layers.map((item) => item.name),
+              ),
+            };
+          }
           const beforeIndex = beforeLayerId ? layers.findIndex((l) => l.id === beforeLayerId) : -1;
           const layerWithBeforeId =
             beforeLayerId && beforeIndex < 0
@@ -1937,6 +1960,9 @@ export const useAppStore = create<AppState>()(
 
       setLayerQuickFilters: (id, filters) =>
         get().updateLayer(id, { quickFilters: filters.length > 0 ? filters : undefined }),
+
+      setLayerFilterExpression: (id, expression) =>
+        get().updateLayer(id, { filterExpression: expression ?? undefined }),
 
       setLayerVisibility: (id, visible) => get().updateLayer(id, { visible }),
 

@@ -557,6 +557,7 @@ function manualChunks(id: string): string | undefined {
   // generic `maplibre-gl` rule below, which would fold it into the eager
   // `maplibre` chunk and force DuckDB into boot. Give it its own lazy chunk.
   if (id.includes("maplibre-gl-duckdb")) return "maplibre-duckdb";
+  if (id.includes("/mapbox-gl/")) return "mapbox";
   if (id.includes("maplibre-gl")) return "maplibre";
   // Cesium is large (~several MB) and only loads when the user opens the 3D
   // globe view; keep it in its own lazily-fetched chunk, off the boot graph.
@@ -932,6 +933,7 @@ function pwaPlugin(): Plugin[] {
     // MapLibre core (~13 MB) and its feature-plugin chunks. The map boots from
     // its first runtime fetch and is CacheFirst-cached thereafter.
     "**/maplibre-*",
+    "**/mapbox-*",
     "**/duckdb-*",
     // CesiumJS (~4.6 MB) for the 3D-globe view. Lazily imported only when a pane
     // switches to the globe, so it is CacheFirst-cached on first use rather than

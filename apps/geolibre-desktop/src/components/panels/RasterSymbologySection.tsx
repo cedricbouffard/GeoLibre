@@ -21,7 +21,9 @@ import {
   type PaletteLegendEntry,
   savedRasterSymbology,
   warmColormapColors,
+  readRasterWindow,
 } from "@geolibre/plugins";
+import type { MapEngine, MapExtent } from "@geolibre/map";
 import {
   Button,
   ColorField,
@@ -40,11 +42,17 @@ import {
   indexById,
   NORMALIZED_DIFFERENCE_INDICES,
 } from "maplibre-gl-raster";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { useColormapRamps } from "../../hooks/useColormapRamps";
 import { formatLegendNumber, setLegendCustomEntry } from "../../lib/auto-legend";
 import { savedRasterAttributeTable } from "../../lib/raster-attribute-table";
+import {
+  normalizeStretchMethod,
+  stretchSamples,
+  viewportRange,
+  type ViewportStretchMethod,
+} from "../../lib/viewport-stretch";
 
 type RasterStateRecord = {
   mode: "single" | "rgb" | "index";
@@ -57,6 +65,8 @@ type RasterStateRecord = {
   nodata: number | "auto" | "off";
   stretch: "linear" | "log" | "sqrt";
   gamma: number;
+  viewportStretchAuto?: boolean;
+  viewportStretchMethod?: ViewportStretchMethod;
 };
 
 const CLASSIFICATION_METHODS: {
@@ -119,6 +129,8 @@ function readRasterState(layer: GeoLibreLayer): RasterStateRecord {
         : "auto",
     stretch: raw.stretch === "log" || raw.stretch === "sqrt" ? raw.stretch : "linear",
     gamma: typeof raw.gamma === "number" && raw.gamma > 0 ? raw.gamma : 1,
+    viewportStretchAuto: raw.viewportStretchAuto === true,
+    viewportStretchMethod: normalizeStretchMethod(raw.viewportStretchMethod),
   };
 }
 
@@ -153,7 +165,13 @@ function rangeFromBreaks(breaks: number[]): [number, number][] {
  *
  * @param props.layer - The selected raster store layer.
  */
-export function RasterSymbologySection({ layer }: { layer: GeoLibreLayer }) {
+export function RasterSymbologySection({
+  layer,
+  mapControllerRef,
+}: {
+  layer: GeoLibreLayer;
+  mapControllerRef?: RefObject<MapEngine | null>;
+}) {
   const { t } = useTranslation();
   const updateLayer = useAppStore((s) => s.updateLayer);
   const state = readRasterState(layer);
@@ -793,6 +811,19 @@ export function RasterSymbologySection({ layer }: { layer: GeoLibreLayer }) {
       )}
 
       {!classified && (
+        <ViewportStretchControls
+          layerId={layer.id}
+          band={band}
+          mapControllerRef={mapControllerRef}
+          autoUpdateInitial={state.viewportStretchAuto === true}
+          onAutoUpdate={(enabled) => commit({ statePatch: { viewportStretchAuto: enabled } })}
+          methodInitial={state.viewportStretchMethod ?? "minmax"}
+          onMethod={(method) => commit({ statePatch: { viewportStretchMethod: method } })}
+          onChange={(rescale) => commit({ statePatch: { rescale } })}
+        />
+      )}
+
+      {!classified && (
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
             <Label htmlFor="rasterStretch">{t("rasterSymbology.stretch")}</Label>
@@ -1146,6 +1177,179 @@ function ClassOpacityInput({
       </span>
     </div>
   );
+}
+
+function ViewportStretchControls({
+  layerId,
+  band,
+  mapControllerRef,
+  autoUpdateInitial,
+  onAutoUpdate,
+  methodInitial,
+  onMethod,
+  onChange,
+}: {
+  layerId: string;
+  band: number;
+  mapControllerRef?: RefObject<MapEngine | null>;
+  autoUpdateInitial: boolean;
+  onAutoUpdate: (enabled: boolean) => void;
+  methodInitial: ViewportStretchMethod;
+  onMethod: (method: ViewportStretchMethod) => void;
+  onChange: (rescale: [number, number][] | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [method, setMethod] = useState<ViewportStretchMethod>(methodInitial);
+  const [autoUpdate, setAutoUpdate] = useState(autoUpdateInitial);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
+  // The parent rebuilds its onChange on every render and applying a range
+  // updates the layer, which re-renders the parent. Reading the callback from a
+  // ref keeps `apply` stable, so the auto-update effect isn't torn down and
+  // re-fired by its own write -- a loop that would keep reading the raster
+  // without the camera ever moving.
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+
+  useEffect(() => {
+    setAutoUpdate(autoUpdateInitial);
+  }, [autoUpdateInitial]);
+
+  useEffect(() => {
+    setMethod(methodInitial);
+  }, [methodInitial]);
+
+  const apply = useCallback(
+    async (silent = false): Promise<void> => {
+      const bounds = mapControllerRef?.current?.getViewBounds?.();
+      if (!bounds) {
+        if (!silent) setMessage(t("rasterSymbology.viewportStretchNoView"));
+        return;
+      }
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setBusy(true);
+      if (!silent) setMessage("");
+      try {
+        const values = await readViewportValues(layerId, band, bounds, controller.signal);
+        if (controller.signal.aborted) return;
+        // A read only describes the extent it started for, and panning changes
+        // neither layerId, band, nor method -- so nothing above cancels it.
+        // Drop it here instead of persisting a range for an extent the map no
+        // longer shows. With auto-update on, the camera-idle listener has
+        // already queued a fresh read for the new extent.
+        if (!sameExtent(mapControllerRef?.current?.getViewBounds?.(), bounds)) {
+          if (!silent) setMessage(t("rasterSymbology.viewportStretchMoved"));
+          return;
+        }
+        if (values.length === 0) {
+          if (!silent) setMessage(t("rasterSymbology.viewportStretchNoValues"));
+          return;
+        }
+        const range = viewportRange(values, method);
+        if (range[0] >= range[1]) {
+          if (!silent) setMessage(t("rasterSymbology.viewportStretchNoRange"));
+          return;
+        }
+        onChangeRef.current([range]);
+        if (!silent) setMessage(t("rasterSymbology.viewportStretchApplied"));
+      } catch (error) {
+        if (!controller.signal.aborted && !silent) {
+          setMessage(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        // Ownership, not the abort flag, decides who clears busy: a superseded
+        // read must leave it set for the read that replaced it, while an
+        // aborted read that nothing replaced must clear it or the Apply button
+        // stays disabled for good.
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+          setBusy(false);
+        }
+      }
+    },
+    [band, layerId, mapControllerRef, method, t],
+  );
+
+  // A read is only meaningful for the layer, band, and method it started under,
+  // so drop it when any of those change. The auto-update effect below aborts
+  // too, but only while auto-update is on -- without this a manual read could
+  // land after a band switch and apply the previous band's range.
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [band, layerId, method],
+  );
+
+  return (
+    <div className="mt-3 space-y-2 border-t pt-3">
+      <Label htmlFor="rasterViewportStretch">{t("rasterSymbology.viewportStretch")}</Label>
+      <div className="grid grid-cols-[1fr_auto] gap-2">
+        <Select
+          id="rasterViewportStretch"
+          value={method}
+          onChange={(event) => {
+            const next = event.target.value as ViewportStretchMethod;
+            setMethod(next);
+            onMethod(next);
+          }}
+        >
+          <option value="minmax">{t("rasterSymbology.viewportMinMax")}</option>
+          <option value="percentile">{t("rasterSymbology.viewportPercentile")}</option>
+          <option value="stddev">{t("rasterSymbology.viewportStddev")}</option>
+        </Select>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void apply()}
+        >
+          {busy ? t("rasterSymbology.viewportStretching") : t("rasterSymbology.viewportApply")}
+        </Button>
+      </div>
+      <label className="flex items-center gap-2 text-xs">
+        <Input
+          type="checkbox"
+          className="h-4 w-4"
+          checked={autoUpdate}
+          onChange={(event) => {
+            setAutoUpdate(event.target.checked);
+            onAutoUpdate(event.target.checked);
+          }}
+        />
+        {t("rasterSymbology.viewportAuto")}
+      </label>
+      {message && <p className="text-[10px] text-muted-foreground">{message}</p>}
+    </div>
+  );
+}
+
+// getViewBounds derives from the camera, so an unmoved map yields the identical
+// numbers and an exact comparison is enough here.
+function sameExtent(current: MapExtent | null | undefined, started: MapExtent): boolean {
+  return current != null && current.every((value, index) => value === started[index]);
+}
+
+async function readViewportValues(
+  layerId: string,
+  band: number,
+  bounds: [number, number, number, number],
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const reading = await readRasterWindow(layerId, {
+    bounds,
+    band,
+    width: 32,
+    height: 32,
+    signal,
+  });
+  return stretchSamples(reading);
 }
 
 function RescaleControls({

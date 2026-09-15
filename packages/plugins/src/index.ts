@@ -1,9 +1,13 @@
 export {
   registerAssistantTool,
   registerAssistantToolSpec,
+  registerAssistantGuidance,
   listAssistantTools,
+  listAssistantGuidance,
   getAssistantToolsVersion,
   unregisterAssistantToolsByOwner,
+  MAX_ASSISTANT_GUIDANCE_LENGTH,
+  type AssistantGuidanceEntry,
 } from "./assistant-tool-registry";
 export * from "./types";
 export { PluginManager } from "./plugin-manager";
@@ -74,6 +78,9 @@ export {
 } from "./plugins/maplibre-basemap-control";
 export {
   addArcGISLayer,
+  isArcGISWritableLayer,
+  saveArcGISLayerEdits,
+  arcGISLayerHasPendingEdits,
   setArcGISFetch,
   fetchArcGISImageServiceRasterFunctions,
   fetchArcGISMapServiceSublayers,
@@ -256,6 +263,7 @@ export {
   restoreRasterLayers,
   getRasterLoadState,
   readRasterPixel,
+  readRasterWindow,
   setLocalRasterFileReader,
   setLocalRasterPicker,
   setNonTiledRasterHandler,
@@ -534,9 +542,11 @@ export {
 } from "./plugins/openaerialmap-api";
 export {
   maplibrePlanetOpenDataPlugin,
+  maplibrePortolanPlugin,
   maplibreStacCatalogsPlugin,
   PLANET_DISASTER_DATA_CATALOG_URL,
   PLANET_OPEN_DATA_PLUGIN_ID,
+  PORTOLAN_PLUGIN_ID,
   setStacLabels,
   STAC_PLUGIN_ID,
   type StacLabels,
@@ -547,8 +557,10 @@ export {
   connectStac,
   isVisualizableAsset,
   itemBbox,
+  loadPortolanIndex,
   loadStacIndex,
   openCatalogNode,
+  PORTOLAN_REGISTRY_URL,
   searchStacApi,
   searchStaticStac,
   STAC_INDEX_CATALOGS_URL,

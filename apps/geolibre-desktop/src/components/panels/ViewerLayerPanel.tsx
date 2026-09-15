@@ -1,11 +1,17 @@
-import { clearQuickFilterValues, hasActiveQuickFilter, useAppStore } from "@geolibre/core";
+import {
+  clearQuickFilterValues,
+  hasActiveLayerFilter,
+  hasActiveQuickFilter,
+  useAppStore,
+} from "@geolibre/core";
 import type { GeoLibreLayer, LayerGroup, LayerQuickFilter } from "@geolibre/core";
 import type { MapEngine } from "@geolibre/map";
 import { Button } from "@geolibre/ui";
-import { Eye, EyeOff, Folder, Layers } from "lucide-react";
+import { Eye, EyeOff, Filter, Folder, Layers } from "lucide-react";
 import { Fragment, useMemo, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuickFilterProfiles } from "../../hooks/useQuickFilterProfiles";
+import { layerFilteredHintKey } from "../../lib/layer-filter-hint";
 import { QuickFilterControl } from "./QuickFilterControl";
 
 /** Indent per group nesting level, in rem, mirroring the Layers panel's tree. */
@@ -156,6 +162,17 @@ export function ViewerLayerPanel({ mapControllerRef, mapReadyGeneration }: Viewe
                 <EyeOff className="h-4 w-4 text-muted-foreground" />
               )}
               <span className="truncate">{layer.name}</span>
+              {/* A persistent expression filter renders no control here, so
+                  without this icon a viewer sees a layer quietly missing
+                  features and nothing saying why. */}
+              {hasActiveLayerFilter(layer) && (
+                <span title={t(layerFilteredHintKey(layer))}>
+                  <Filter
+                    className="h-3 w-3 shrink-0 text-primary"
+                    aria-label={t(layerFilteredHintKey(layer))}
+                  />
+                </span>
+              )}
             </label>
             {(layer.quickFilters?.length ?? 0) > 0 && (
               <ViewerQuickFilters

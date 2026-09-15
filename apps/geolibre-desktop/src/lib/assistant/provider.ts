@@ -173,6 +173,8 @@ export interface RuntimeEnvSources {
   geocoderEnv: Record<string, string>;
   /** The device-local Cesium Ion token as `VITE_CESIUM_TOKEN`, or empty. */
   cesiumEnv: Record<string, string>;
+  /** Device-local Mapbox token; explicit project entries still win. */
+  mapboxEnv?: Record<string, string>;
   /** The project's explicit Environment variables. Highest precedence. */
   projectEnv: Record<string, string>;
 }
@@ -193,6 +195,7 @@ export function mergeRuntimeEnv({
   aiEnv,
   geocoderEnv,
   cesiumEnv,
+  mapboxEnv,
   projectEnv,
 }: RuntimeEnvSources): RuntimeEnv {
   return {
@@ -200,6 +203,7 @@ export function mergeRuntimeEnv({
     ...aiEnv,
     ...geocoderEnv,
     ...cesiumEnv,
+    ...mapboxEnv,
     ...projectEnv,
   };
 }

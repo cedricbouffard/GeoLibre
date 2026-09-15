@@ -112,3 +112,18 @@ for (const abortBeforeReady of [true, false]) {
     assert.equal(typeof cancelled, "string");
   });
 }
+
+it("passes form-encoded ArcGIS writes to the native transport without changing their body", async () => {
+  const body = "f=json&token=secret&deletes=12";
+  const fetchImpl = createNativeArcGISFetch(async (url, _signal, posted) => {
+    assert.equal(url, "https://example.com/FeatureServer/0/applyEdits");
+    assert.equal(posted, body);
+    return { status: 200, body: '{"deleteResults":[{"success":true,"objectId":12}]}' };
+  });
+  const response = await fetchImpl("https://example.com/FeatureServer/0/applyEdits", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  assert.equal((await response.json()).deleteResults[0].success, true);
+});

@@ -1,9 +1,15 @@
 import type { BBox, Feature, Geometry } from "geojson";
 
 export const STAC_INDEX_CATALOGS_URL = "https://stacindex.org/api/catalogs";
+export const PORTOLAN_REGISTRY_URL =
+  "https://raw.githubusercontent.com/portolan-sdi/portolan-registry/refs/heads/main/exports/catalogs.json";
 const USGS_ASTROGEOLOGY_API_URL = "https://stac.astrogeology.usgs.gov/api";
 // No item-search endpoint to ask, so a page is however much of the tree the walk covers.
 const STATIC_SEARCH_READS_PER_PAGE = 300;
+// A `next` chain is only as finite as the server makes it, and `visited` catches a cycle that
+// repeats a URL, not a long walk of distinct ones. Stop after this many pages and use what was
+// reached, the same bound STATIC_SEARCH_READS_PER_PAGE puts on a static catalog crawl.
+const COLLECTION_PAGES_MAX = 50;
 const STATIC_SEARCH_CONCURRENCY = 12;
 
 export interface StacIndexCatalog {
@@ -266,6 +272,46 @@ export async function loadStacIndex(
     .sort((a, b) => a.title.localeCompare(b.title));
 }
 
+/** The Portolan registry publishes its catalog list as a static STAC catalog. */
+export async function loadPortolanIndex(
+  fetcher: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<StacIndexCatalog[]> {
+  const document = await fetchJson<Record<string, unknown>>(
+    PORTOLAN_REGISTRY_URL,
+    { signal },
+    fetcher,
+  );
+  return portolanIndexFromDocument(document);
+}
+
+/**
+ * Reuse a connected registry document for discovery without fetching it again.
+ *
+ * @param document - The registry's root catalog document.
+ * @param base - The URL the document was fetched from, for resolving relative links.
+ */
+export function portolanIndexFromDocument(
+  document: Record<string, unknown>,
+  base: string = PORTOLAN_REGISTRY_URL,
+): StacIndexCatalog[] {
+  if (!document || document.type !== "Catalog" || !Array.isArray(document.links)) {
+    throw new Error("Portolan Registry returned an invalid catalog list");
+  }
+  return linksOf(document.links, base)
+    .filter((link) => link.rel === "child" && httpUrl(link.href))
+    .map((link, id) => ({
+      id,
+      url: link.href,
+      slug: link.href,
+      title: link.title || link.href,
+      summary: "",
+      access: "public" as const,
+      isApi: false,
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
+}
+
 function linksOf(value: unknown, base: string): StacLink[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((link) => {
@@ -361,6 +407,52 @@ function collectionBbox(
   return horizontalBbox(Array.isArray(boxes) ? boxes[0] : undefined);
 }
 
+function isStacCollection(value: unknown): value is StacCollection {
+  return (
+    Boolean(value) && typeof value === "object" && typeof (value as StacCollection).id === "string"
+  );
+}
+
+/** One page of a `/collections` response: the collections it carries and the links off it. */
+interface StacCollectionsPage {
+  collections?: unknown;
+  links?: unknown;
+}
+
+async function loadStacCollections(
+  href: string,
+  fetcher: FetchLike,
+  signal?: AbortSignal,
+): Promise<StacCollection[]> {
+  const collections: StacCollection[] = [];
+  const visited = new Set<string>();
+  let pageUrl: string | undefined = href;
+
+  while (pageUrl && !visited.has(pageUrl) && visited.size < COLLECTION_PAGES_MAX) {
+    visited.add(pageUrl);
+    // The annotation is load-bearing: narrowing `pageUrl` here means following it through the
+    // assignment at the bottom of the loop, which reads `data` — a cycle TypeScript reports as
+    // TS7022 unless `data` states its own type.
+    let data: StacCollectionsPage | null;
+    try {
+      data = await fetchJson<StacCollectionsPage | null>(pageUrl, { signal }, fetcher);
+    } catch {
+      // A page failing does not un-fetch the pages before it. The caller treats discovery as
+      // optional, so the pages that did arrive are worth more than the whole crawl thrown away.
+      break;
+    }
+    // `response.json()` hands back a JSON `null` body as `null`, which no field read survives —
+    // and a page that is not an object carries neither collections nor a link onward.
+    if (typeof data !== "object" || data === null) break;
+    if (Array.isArray(data.collections)) {
+      collections.push(...data.collections.filter(isStacCollection));
+    }
+    pageUrl = linksOf(data.links, pageUrl).find((link) => link.rel === "next")?.href;
+  }
+
+  return collections;
+}
+
 /** Presents a Collection's own assets as one item so the existing asset browser can render it. */
 function collectionAssetItem(document: Record<string, unknown>, url: string): StacItem | undefined {
   if (document.type !== "Collection" || typeof document.id !== "string") return undefined;
@@ -441,14 +533,11 @@ export async function connectStac(
   );
   if (collectionsLink) {
     try {
-      const data = await fetchJson<{ collections?: StacCollection[] }>(
-        collectionsLink.href,
-        { signal },
-        fetcher,
-      );
-      if (Array.isArray(data.collections)) collections = data.collections;
+      collections = await loadStacCollections(collectionsLink.href, fetcher, signal);
     } catch {
-      // Collection discovery is helpful but not required for item search.
+      // Collection discovery is helpful but not required for item search. A failed or malformed
+      // page no longer reaches here -- loadStacCollections stops the walk and returns what it
+      // gathered -- so this stays only as a backstop for anything it does not anticipate.
     }
   }
 

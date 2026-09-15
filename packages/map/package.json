@@ -1,6 +1,6 @@
 {
   "name": "@geolibre/map",
-  "version": "2.9.0",
+  "version": "3.0.0",
   "description": "Headless MapLibre layer synchronization and style engine from GeoLibre",
   "keywords": [
     "geolibre",
@@ -31,6 +31,7 @@
     "./headless": "./src/headless.ts",
     "./derived-geometry": "./src/derived-geometry.ts",
     "./pmtiles-layer": "./src/pmtiles-layer.ts",
+    "./style-import": "./src/style-import.ts",
     "./style-layer-ids": "./src/style-layer-ids.ts",
     "./map-capture": "./src/map-capture.ts"
   },
@@ -54,6 +55,10 @@
         "types": "./dist/pmtiles-layer.d.mts",
         "import": "./dist/pmtiles-layer.mjs"
       },
+      "./style-import": {
+        "types": "./dist/style-import.d.mts",
+        "import": "./dist/style-import.mjs"
+      },
       "./style-layer-ids": {
         "types": "./dist/style-layer-ids.d.mts",
         "import": "./dist/style-layer-ids.mjs"
@@ -66,7 +71,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsdown src/headless.ts src/derived-geometry.ts src/pmtiles-layer.ts src/style-layer-ids.ts src/map-capture.ts --format esm --dts"
+    "build": "tsdown src/headless.ts src/derived-geometry.ts src/pmtiles-layer.ts src/style-import.ts src/style-layer-ids.ts src/map-capture.ts --format esm --dts"
   },
   "dependencies": {
     "@cesium/engine": "^26.3.0",
@@ -89,17 +94,18 @@
     "fast-xml-parser": "^5.11.1",
     "geotiff": "^3.0.5",
     "laz-perf": "^0.0.7",
-    "maplibre-gl": "^6.7.0",
+    "mapbox-gl": "^3.30.0",
+    "maplibre-gl": "^6.9.0",
     "maplibre-gl-layer-control": "^0.17.4",
     "pmtiles": "^4.5.0",
     "proj4": "^2.22.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/geojson": "^7946.0.16",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2"
   },

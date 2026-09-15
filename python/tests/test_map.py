@@ -1439,3 +1439,20 @@ def test_layer_set_popup_bumps_the_sync_sequence(m):
     seq = m._seq
     layer.set_popup(["a"])
     assert m._seq > seq
+
+
+def test_mapbox_renderer_roundtrip(m, tmp_path):
+    """Mapbox survives project save/load and mixed renderer split views."""
+    from geolibre import Map
+
+    m.set_renderer("mapbox")
+    m.set_map_layout(1, 2, view_kinds=["mapbox", "cesium"])
+    assert m.get_renderer() == "mapbox"
+    pane = m.project["secondaryMapViews"][0]
+    m.set_renderer("mapbox", pane_id=pane["id"])
+    path = tmp_path / "mapbox.geolibre.json"
+    m.save_project(path)
+    reopened = Map(renderer="mapbox")
+    reopened.load_project(path)
+    assert reopened.get_renderer() == "mapbox"
+    assert reopened.get_renderer(pane_id=pane["id"]) == "mapbox"

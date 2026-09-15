@@ -6,6 +6,7 @@ import {
   type DecodedTile,
 } from "./cesium-protocol-imagery";
 import { createLayerSync, type LayerSync } from "./headless";
+import { arcgisVectorStyle } from "./arcgis-vector-style";
 
 // The MapLibre drape (issue #2284): tile-backed vector layers on the globe.
 //
@@ -46,6 +47,8 @@ const IDLE_TIMEOUT_MS = 8000;
 
 /** The layer kinds the drape draws. */
 const DRAPED_TYPES = new Set(["vector-tiles", "pmtiles", "mbtiles"]);
+/** `metadata.sourceKind` for the layers maplibre-gl-vector owns (as in layer-sync.ts). */
+const VECTOR_CONTROL_SOURCE_KIND = "maplibre-gl-vector";
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
@@ -58,12 +61,21 @@ function isVectorArchive(layer: GeoLibreLayer): boolean {
 /**
  * Whether the globe draws `layer` through the drape: a tile-backed vector
  * kind with a source to read. Raster archives take the native imagery bridge
- * instead, and `arcgis` (VectorTileServer) layers are painted by their own
- * control, which the drape has no way to host.
+ * instead. ArcGIS VectorTileServer layers need their resolved sources and
+ * style layers; old control-only records cannot be reconstructed here.
  */
 export function isDrapedLayer(layer: GeoLibreLayer): boolean {
+  if (layer.type === "arcgis") return arcgisVectorStyle(layer) !== null;
   if (!DRAPED_TYPES.has(layer.type)) return false;
   if (layer.type === "vector-tiles") {
+    // maplibre-gl-vector's tiled records are control-owned: the 2D sync the
+    // drape reuses never creates their DuckDB source, so they render from a
+    // collection (see the plugin's vector-cesium-bridge) or not at all.
+    if (
+      layer.metadata?.sourceKind === VECTOR_CONTROL_SOURCE_KIND &&
+      layer.metadata.externalNativeLayer === true
+    )
+      return false;
     return (
       Boolean(str(layer.source?.url)) ||
       (Array.isArray(layer.source?.tiles) && layer.source.tiles.length > 0)
@@ -108,6 +120,7 @@ function layerSignature(layer: GeoLibreLayer): string {
       layer.metadata,
       layer.sourcePath,
       layer.quickFilters,
+      layer.filterExpression,
       layer.timeFilter,
       layer.embedFilter,
     ]);

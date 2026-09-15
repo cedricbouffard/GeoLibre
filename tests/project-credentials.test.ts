@@ -17,6 +17,13 @@ function credentialProject() {
   project.preferences.geocoding.forwardEndpoint =
     "https://geocode.example.com/search?key=endpoint-secret";
   project.basemapStyleUrl = "https://styles.example.com/map.json?access_token=basemap-secret";
+  project.preferences = {
+    ...project.preferences,
+    map: {
+      ...project.preferences.map,
+      mapboxStyleUrl: "https://api.mapbox.com/styles/v1/acme/day?access_token=mapbox-style-secret",
+    },
+  };
   project.layers = [
     {
       id: "auth",
@@ -55,6 +62,7 @@ describe("project credential redaction", () => {
       "geocoder-secret",
       "endpoint-secret",
       "basemap-secret",
+      "mapbox-style-secret",
       "password",
       "url-secret",
       "encoded-secret",
@@ -70,7 +78,12 @@ describe("project credential redaction", () => {
     assert.deepEqual(project.plugins?.settings, {});
     assert.ok(redactedPaths.includes("plugins.settings"));
     assert.equal(redactedPaths.includes("basemapStyleUrl"), true);
-    assert.equal(redactProjectCredentials(original).redactedCount, 9);
+    assert.equal(redactedPaths.includes("preferences.map.mapboxStyleUrl"), true);
+    assert.equal(
+      project.preferences.map.mapboxStyleUrl,
+      "https://api.mapbox.com/styles/v1/acme/day",
+    );
+    assert.equal(redactProjectCredentials(original).redactedCount, 10);
     assert.equal(original.plugins?.settings.external.arbitraryName, "plugin-secret");
   });
 
@@ -215,6 +228,38 @@ describe("project credential redaction", () => {
       assert.ok(!serialized.includes(secret), `redacted ${secret}`);
     }
     assert.deepEqual(safe.layers[0].source, { sr: 4326, key: "layer-identifier" });
+  });
+
+  it("strips tokens from the resolved ArcGIS vector-tile sources", () => {
+    // The ArcGIS plugin persists the SDK's resolved sources on the layer so
+    // the Cesium drape can rebuild them; a token-bearing tile URL rides along.
+    const project = credentialProject();
+    project.layers[0] = {
+      ...project.layers[0],
+      type: "arcgis",
+      source: {
+        arcgisSources: {
+          parcels: {
+            type: "vector",
+            tiles: ["https://tiles.example.com/{z}/{x}/{y}.pbf?token=arcgis-secret&f=pbf"],
+          },
+        },
+        arcgisLayers: [
+          { id: "parcels-fill", type: "fill", source: "parcels", "source-layer": "parcels" },
+        ],
+      },
+      metadata: { nativeLayerIds: ["parcels-fill"] },
+    };
+
+    const { project: safe, redactedPaths } = redactProjectCredentials(project);
+    const serialized = serializeProject(safe);
+    assert.ok(!serialized.includes("arcgis-secret"));
+    const sources = safe.layers[0].source.arcgisSources as {
+      parcels: { tiles: string[] };
+    };
+    assert.deepEqual(sources.parcels.tiles, ["https://tiles.example.com/{z}/{x}/{y}.pbf?f=pbf"]);
+    assert.deepEqual(safe.layers[0].source.arcgisLayers, project.layers[0].source.arcgisLayers);
+    assert.ok(redactedPaths.includes("layers[0].source.arcgisSources.parcels.tiles[0]"));
   });
 
   it("sweeps a layer's connection record, not only its source", () => {

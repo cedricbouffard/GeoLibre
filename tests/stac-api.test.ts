@@ -146,6 +146,114 @@ test("connectStac discovers relative API links and collections", async () => {
   assert.deepEqual(calls, ["https://example.com/stac/", "https://example.com/stac/collections"]);
 });
 
+test("connectStac follows paginated collection links", async () => {
+  const calls: string[] = [];
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/collections")) {
+      return jsonResponse({
+        collections: [{ id: "first", title: "First" }],
+        links: [{ rel: "next", href: "./collections?offset=1" }],
+      });
+    }
+    if (url.endsWith("/collections?offset=1")) {
+      return jsonResponse({ collections: [{ id: "hrdem-lidar", title: "HRDEM LiDAR" }] });
+    }
+    return jsonResponse({
+      id: "demo",
+      title: "Demo STAC",
+      conformsTo: ["https://api.stacspec.org/v1.0.0/item-search"],
+      links: [
+        { rel: "search", href: "./search" },
+        { rel: "data", href: "./collections" },
+      ],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.deepEqual(
+    connection.collections.map((collection) => collection.id),
+    ["first", "hrdem-lidar"],
+  );
+  assert.deepEqual(calls, [
+    "https://example.com/stac/",
+    "https://example.com/stac/collections",
+    "https://example.com/stac/collections?offset=1",
+  ]);
+});
+
+test("connectStac keeps the collection pages it read when a later page fails", async () => {
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/collections")) {
+      return jsonResponse({
+        collections: [{ id: "first", title: "First" }],
+        links: [{ rel: "next", href: "./collections?offset=1" }],
+      });
+    }
+    if (url.endsWith("/collections?offset=1")) throw new Error("network");
+    return jsonResponse({
+      id: "demo",
+      links: [{ rel: "data", href: "./collections" }],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.deepEqual(
+    connection.collections.map((collection) => collection.id),
+    ["first"],
+  );
+});
+
+test("connectStac keeps the collection pages it read when a later page is JSON null", async () => {
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/collections")) {
+      return jsonResponse({
+        collections: [{ id: "first", title: "First" }],
+        links: [{ rel: "next", href: "./collections?offset=1" }],
+      });
+    }
+    if (url.endsWith("/collections?offset=1")) return jsonResponse(null);
+    return jsonResponse({
+      id: "demo",
+      links: [{ rel: "data", href: "./collections" }],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.deepEqual(
+    connection.collections.map((collection) => collection.id),
+    ["first"],
+  );
+});
+
+test("connectStac stops following collection pages at the page cap", async () => {
+  let pages = 0;
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const offset = new URL(url).searchParams.get("offset");
+    if (url.includes("/collections")) {
+      pages += 1;
+      const next = Number(offset ?? 0) + 1;
+      // Every page advertises another one, so only the cap ends the walk.
+      return jsonResponse({
+        collections: [{ id: `collection-${offset ?? 0}` }],
+        links: [{ rel: "next", href: `./collections?offset=${next}` }],
+      });
+    }
+    return jsonResponse({
+      id: "demo",
+      links: [{ rel: "data", href: "./collections" }],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.equal(pages, 50);
+  assert.equal(connection.collections.length, 50);
+});
+
 test("connectStac reads only the root of a static catalog", async () => {
   const fetched: string[] = [];
   const fetcher = (async (input: RequestInfo | URL) => {
