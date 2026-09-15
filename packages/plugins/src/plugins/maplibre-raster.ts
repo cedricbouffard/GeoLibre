@@ -1,5 +1,6 @@
 import { effectiveLayerRenderState, styleValue, useAppStore } from "@geolibre/core";
 import type { Layer } from "@deck.gl/core";
+import type { Map as MapboxMap } from "mapbox-gl";
 import type {
   RasterControl,
   RasterControlEventHandler,
@@ -40,6 +41,7 @@ import { disposeAllPaletteLegends, disposePaletteLegend } from "./raster-palette
 import { isNonTiledRasterError } from "./non-tiled-raster-error";
 import { convertTiffYCbCrToRgb } from "./tiff-ycbcr";
 import { readableStacLayerHref } from "./stac-signing";
+import { configureMapboxRasterEngine } from "./raster-mapbox-compat";
 
 const rasterControlPosition: GeoLibreMapControlPosition = "top-left";
 const RASTER_PANEL_CLASS = "geolibre-raster-panel";
@@ -56,6 +58,7 @@ const RASTER_PANEL_CLASS = "geolibre-raster-panel";
 // into discrete classes" and custom color ramps (see raster-symbology-texture)
 // -- does not apply while this engine is active. Users who need it can switch
 // the panel's Rendering engine back to maplibre-gl-raster (GPU).
+// Mapbox uses GPU instead: its workers cannot fetch the WASM tiler's protocol.
 const DEFAULT_RASTER_ENGINE: RenderEngine = "cog-tiler-wasm";
 
 // One-click sample COGs shown in the panel's "Load sample data" dropdown.
@@ -848,7 +851,7 @@ async function readLocalRasterFiles(control: RasterControl): Promise<Map<string,
 async function ensureRasterControl(app: GeoLibreAppAPI): Promise<RasterControl | null> {
   const RasterControlClass = await getRasterControlClass();
 
-  rasterControl ??= createRasterControl(RasterControlClass);
+  rasterControl ??= createRasterControl(RasterControlClass, !!app.getMapboxMap?.());
 
   if (!rasterControlMounted) {
     const added = app.addMapControl(rasterControl, rasterControlPosition);
@@ -878,6 +881,10 @@ async function ensureRasterControl(app: GeoLibreAppAPI): Promise<RasterControl |
     wireRasterCloseButton(rasterControl);
     wireRasterBrowseButton(rasterControl);
     applyRasterPanelClass(rasterControl);
+    if (app.getMapboxMap?.()) {
+      const panel = (rasterControl as unknown as RasterControlInternals)._panel;
+      panel?.querySelector('option[value="cog-tiler-wasm"]')?.remove();
+    }
   }
 
   return rasterControl;
@@ -1016,7 +1023,10 @@ function getMapboxOverlayClass(): Promise<MapboxOverlayConstructor> {
   return mapboxOverlayClassPromise;
 }
 
-function createRasterControl(RasterControlClass: RasterControlConstructor): RasterControl {
+function createRasterControl(
+  RasterControlClass: RasterControlConstructor,
+  mapbox: boolean,
+): RasterControl {
   rasterControlInterleaved = !isTauriRuntime();
   const control = new RasterControlClass({
     className: "geolibre-raster-control",
@@ -1036,6 +1046,7 @@ function createRasterControl(RasterControlClass: RasterControlConstructor): Rast
     panelWidth: 380,
     title: "Add Raster Layer",
   });
+  if (mapbox) configureMapboxRasterEngine(control);
 
   // deck.gl's COG tile traversal does not support MapLibre's globe view
   // ("TODO: implement getBoundingVolume in Globe view"), so adding a raster
@@ -1051,7 +1062,13 @@ function createRasterControl(RasterControlClass: RasterControlConstructor): Rast
     control.on(event, () => {
       if (rendersNativeMapLibreLayer(control.getEngine())) return;
       if (control.getRasters().length === 0) return;
-      ensureMercatorProjection(control.getMap());
+      if (mapbox) {
+        // Mapbox calls this field `name`; MapLibre calls it `type`.
+        const map = control.getMap() as unknown as MapboxMap | undefined;
+        if (map?.getProjection().name !== "mercator") map?.setProjection("mercator");
+      } else {
+        ensureMercatorProjection(control.getMap());
+      }
     });
   }
   for (const event of ["rasteradd", "rasterchange", "rasterremove"] as const) {

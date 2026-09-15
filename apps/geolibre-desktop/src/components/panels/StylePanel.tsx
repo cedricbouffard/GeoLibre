@@ -73,6 +73,12 @@ import { LayerJoinsSection } from "./LayerJoinsSection";
 import { QuickFiltersSection } from "./QuickFiltersSection";
 import { VirtualFieldsSection } from "./VirtualFieldsSection";
 import { getNetcdfLayerState, NETCDF_IMAGE_SOURCE_KIND } from "../../lib/netcdf-image-symbology";
+import { PasteStyleDialog } from "./PasteStyleDialog";
+import {
+  IMPORTED_STYLE_NOTE_DURATION_MS,
+  importedStyleNote,
+  type ImportedStyleNote,
+} from "../../lib/style-import-note";
 import { NetcdfProfilePanel } from "./NetcdfProfilePanel";
 import { NetcdfSymbologySection } from "./NetcdfSymbologySection";
 import { RasterSymbologySection } from "./RasterSymbologySection";
@@ -81,6 +87,7 @@ import { ExpressionBuilderDialog } from "../expressions/ExpressionBuilderDialog"
 import {
   ChevronDown,
   ChevronUp,
+  ClipboardType,
   CornerDownRight,
   Info,
   Palette,
@@ -103,7 +110,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { loadedVectorTileFeatures } from "../../hooks/useVectorTileGeometryBackfill";
+import { loadedVectorTileFeatures, vectorTileMap } from "../../hooks/useVectorTileGeometryBackfill";
 import { clamp } from "../../lib/clamp";
 import {
   getAttributePropertyNames,
@@ -1020,6 +1027,11 @@ export function StylePanel({
   const setLayerOpacity = useAppStore((s) => s.setLayerOpacity);
   const setLayerStyle = useAppStore((s) => s.setLayerStyle);
   const setStyleManagerOpen = useAppStore((s) => s.setStyleManagerOpen);
+  const [pasteStyleOpen, setPasteStyleOpen] = useState(false);
+  // What the last pasted style reported. The Layers panel has a per-row note for this; this
+  // panel has none, and dropping the parser's warnings would make an import that could not be
+  // fully represented look like a clean one.
+  const [pasteStyleNotice, setPasteStyleNotice] = useState<ImportedStyleNote | null>(null);
   const updateLayer = useAppStore((s) => s.updateLayer);
   const moveLayer = useAppStore((s) => s.moveLayer);
   const projectName = useAppStore((s) => s.projectName);
@@ -1156,11 +1168,26 @@ export function StylePanel({
       }
     | null
   >(null);
-  // Close the builder when the selected layer changes: its fields, sample
-  // features, and target expression all belong to the previous layer.
+  // Close both dialogs when the selected layer changes. The builder's fields, sample features and
+  // target expression all belong to the previous layer; a paste box left open would submit one
+  // layer's style onto another.
   useEffect(() => {
     setExpressionBuilderTarget(null);
+    setPasteStyleOpen(false);
+    setPasteStyleNotice(null);
   }, [selectedLayerId]);
+
+  // Fade the header note the way the Layers panel fades its row status. Without this a stale
+  // "Style imported." stays pinned under the header while the user keeps working on the same layer.
+  // The cleanup covers a second import, a change of layer, and unmount.
+  useEffect(() => {
+    if (!pasteStyleNotice) return;
+    const timer = window.setTimeout(
+      () => setPasteStyleNotice(null),
+      IMPORTED_STYLE_NOTE_DURATION_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [pasteStyleNotice]);
 
   const layer = layers.find((l) => l.id === selectedLayerId);
 
@@ -1299,7 +1326,8 @@ export function StylePanel({
       // Tiled sources only expose the features currently loaded, so an empty
       // sample means the tiles have not arrived yet rather than an empty
       // attribute — keep re-reading until the map settles with features.
-      const map = mapControllerRef.current?.getMap();
+      const engine = mapControllerRef.current;
+      const map = vectorTileMap(engine);
       if (!map) {
         setLoadedVectorPropertyValues(null);
         setVectorPropertyValuesUnavailable(true);
@@ -1307,7 +1335,7 @@ export function StylePanel({
         return;
       }
       const sampleValues = (): boolean => {
-        const features = loadedVectorTileFeatures(map, layer);
+        const features = loadedVectorTileFeatures(map, layer, engine?.kind);
         if (features.length === 0) return false;
         const byProperty: Record<string, unknown[]> = {};
         for (const property of propertiesToLoad) {
@@ -5063,16 +5091,33 @@ export function StylePanel({
               panel also serves mbtiles/plugin/deck layers, where the dialog
               would open with Apply/Save disabled. */}
           {isStyleLibraryTargetLayer(layer.type) && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              title={t("style.openStyleManager")}
-              aria-label={t("style.openStyleManager")}
-              onClick={() => setStyleManagerOpen(true)}
-            >
-              <Palette className="h-4 w-4" />
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title={t("style.openStyleManager")}
+                aria-label={t("style.openStyleManager")}
+                onClick={() => setStyleManagerOpen(true)}
+              >
+                <Palette className="h-4 w-4" />
+              </Button>
+              {/* The other door into this is the layer's actions menu, a long way from where
+                  someone thinking about symbology already is. */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title={t("layers.importStyleFromText")}
+                aria-label={t("layers.importStyleFromText")}
+                onClick={() => {
+                  setPasteStyleNotice(null);
+                  setPasteStyleOpen(true);
+                }}
+              >
+                <ClipboardType className="h-4 w-4" />
+              </Button>
+            </>
           )}
           <Button
             variant="ghost"
@@ -5086,6 +5131,17 @@ export function StylePanel({
           </Button>
         </div>
       </div>
+      {pasteStyleNotice && (
+        <p
+          className={`border-b px-3 py-1.5 text-xs ${
+            pasteStyleNotice.type === "warning" ? "text-amber-600" : "text-emerald-600"
+          }`}
+          data-testid="style-paste-notice"
+          role="status"
+        >
+          {pasteStyleNotice.message}
+        </p>
+      )}
       <ScrollArea className="flex-1">
         {/* Padding lives on the inner content (not the ScrollArea root) with
             extra right clearance so the overlay scrollbar never covers the
@@ -5284,6 +5340,20 @@ export function StylePanel({
               : t("style.footerMaplibre")}
       </p>
       {expressionBuilderDialog}
+      <PasteStyleDialog
+        open={pasteStyleOpen}
+        onOpenChange={setPasteStyleOpen}
+        onApply={(imported) => {
+          // Merge onto the store's current style, not the one this render closed over: the box can
+          // sit open while the panel's own controls edit the same layer. The layer *identity* is
+          // safe to close over, because a change of selection closes the dialog above.
+          const latest = useAppStore.getState().layers.find((c) => c.id === layer.id);
+          // Removed while the box was open — nothing to style.
+          if (!latest) return;
+          updateLayer(layer.id, { style: imported.apply(latest.style) });
+          setPasteStyleNotice(importedStyleNote(t, imported.warnings));
+        }}
+      />
     </aside>
   );
 }

@@ -1,6 +1,7 @@
 import { useAppStore } from "@geolibre/core";
 import {
   CESIUM_CAPABILITIES,
+  MAPBOX_CAPABILITIES,
   MAPLIBRE_CAPABILITIES,
   type MapEngineCapabilities,
 } from "@geolibre/map";
@@ -28,7 +29,12 @@ import type { MapControllerRef } from "../components/layout/toolbar/constants";
  */
 export function useMapCapabilities(mapControllerRef?: MapControllerRef): MapEngineCapabilities {
   const primaryRenderer = useAppStore((s) => s.primaryRenderer);
-  const fallback = primaryRenderer === "cesium" ? CESIUM_CAPABILITIES : MAPLIBRE_CAPABILITIES;
+  const fallback =
+    primaryRenderer === "cesium"
+      ? CESIUM_CAPABILITIES
+      : primaryRenderer === "mapbox"
+        ? MAPBOX_CAPABILITIES
+        : MAPLIBRE_CAPABILITIES;
   const engine = mapControllerRef?.current;
   // Trust the ref only while it agrees with the store about which renderer is
   // live. The store flips `primaryRenderer` during render; the canvases publish

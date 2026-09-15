@@ -142,7 +142,7 @@ add_swipe(path, left_layers, right_layers, orientation="vertical",
           position=50, control_position="top-right")
 ```
 
-- `set_renderer`: use `"maplibre"` or `"cesium"`; omit `pane_id` for the primary map.
+- `set_renderer`: use `"maplibre"`, `"cesium"` or `"mapbox"`; omit `pane_id` for the primary map. `"mapbox"` needs a Mapbox access token configured in the app's Settings.
 - `set_map_layout`: rows/cols are integers 1–4. `view_kinds` lists every pane renderer, primary first. Read secondary IDs from the returned `secondaryMapViews` before changing a named pane.
 - `set_view`: `zoom` is clamped to 0–24. `bbox` is `[west, south, east, north]`
   and is resolved to a camera approximately — see the SKILL's gotcha list.

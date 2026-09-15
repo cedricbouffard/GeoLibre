@@ -398,6 +398,12 @@ export interface GeoLibreAppAPI {
    * See AssistantToolSpec for input validation and return-value requirements.
    */
   registerAssistantToolSpec?: (spec: AssistantToolSpec, ownerPluginId?: string) => () => void;
+  /** Append guidance text to the assistant's system prompt while the plugin is
+   * active, e.g. when to call the plugin's tools instead of run_sql. The host
+   * scopes ownership to the calling plugin, removes the text on deactivation,
+   * and refreshes the assistant before its next prompt. Returns a disposer.
+   */
+  registerAssistantGuidance?: (text: string, ownerPluginId?: string) => () => void;
 
   setBasemap: (styleUrl: string) => void;
   addGeoJsonLayer: (name: string, data: FeatureCollection, sourcePath?: string) => string;
@@ -542,6 +548,16 @@ export interface GeoLibreAppAPI {
   unregisterTemporalLayer?: (layerId: string) => void;
   getActiveBasemap: () => string;
   onBasemapChange: (callback: (styleUrl: string) => void) => () => void;
+  /** Current layer ids in the project, in their current order. */
+  getLayers?: () => string[];
+  /**
+   * Subscribe to the project's layer ids, mirroring {@link onBasemapChange}
+   * for layers. `callback` fires whenever a layer is added, removed, or
+   * reordered anywhere in the app — including the user removing one from the
+   * Layers panel, or another plugin adding one. Returns an unsubscribe
+   * function.
+   */
+  onLayersChanged?: (callback: (layerIds: string[]) => void) => () => void;
   fetchArrayBuffer?: (url: string) => Promise<ArrayBuffer>;
   /**
    * Resolve a fetchable URL for an asset shipped alongside an external
@@ -614,6 +630,8 @@ export interface GeoLibreAppAPI {
   getMap?: () => MapLibreMap | null;
   /** Active primary renderer, including while its canvas is being replaced. */
   getMapRenderer?: () => MapRendererKind;
+  /** Native Mapbox map, available only while Mapbox is the primary renderer. */
+  getMapboxMap?: () => ReturnType<import("@geolibre/map").MapboxEngine["getMapboxMap"]>;
   /**
    * The primary Cesium globe's native scene, or `null` when the primary map is
    * not a globe (or is still mounting). The globe's counterpart to

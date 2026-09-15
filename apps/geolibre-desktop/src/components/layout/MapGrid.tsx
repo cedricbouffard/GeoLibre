@@ -1,17 +1,25 @@
-import { isCesiumOnlyLayer, useAppStore } from "@geolibre/core";
-import { CesiumCanvas, isCesiumSupportedLayerType, SecondaryMapCanvas } from "@geolibre/map";
+import { isCesiumOnlyLayer, useAppStore, type MapRendererKind } from "@geolibre/core";
+import {
+  CesiumCanvas,
+  isCesiumSupportedLayerType,
+  isMapboxSupportedLayer,
+  SecondaryMapCanvas,
+} from "@geolibre/map";
 import {
   Button,
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@geolibre/ui";
 import { Globe, Layers, Map as MapIcon, X } from "lucide-react";
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { PrimaryMapboxCanvas } from "./PrimaryMapboxCanvas";
 import { useCesiumIonToken } from "../../hooks/useCesiumIonToken";
 
 /**
@@ -117,13 +125,16 @@ function SecondaryMapPane({ viewId, index, cesiumToken }: SecondaryMapPaneProps)
   const setSecondaryViewKind = useAppStore((s) => s.setSecondaryViewKind);
   const label = useAppStore((s) => s.secondaryMapViews.find((p) => p.id === viewId)?.label ?? "");
   // Absent viewKind means the default 2D map (back-compat with older panes).
-  const is3d = useAppStore(
-    (s) => s.secondaryMapViews.find((p) => p.id === viewId)?.viewKind === "cesium",
+  const renderer = useAppStore(
+    (s) => s.secondaryMapViews.find((p) => p.id === viewId)?.viewKind ?? "maplibre",
   );
+  const is3d = renderer === "cesium";
 
   return (
     <div className="relative isolate min-h-0 min-w-0 overflow-hidden bg-background">
-      {is3d ? (
+      {renderer === "mapbox" ? (
+        <PrimaryMapboxCanvas viewId={viewId} />
+      ) : is3d ? (
         // Key on the token so changing the Cesium Ion token in Settings remounts
         // the globe: `Cesium.Ion.defaultAccessToken` is applied once at viewer
         // creation, so without a remount a swapped (e.g. corrected) token would
@@ -147,22 +158,41 @@ function SecondaryMapPane({ viewId, index, cesiumToken }: SecondaryMapPaneProps)
         ariaLabel={t("mapGrid.labelLabel", { number: index + 2 })}
       />
       <div className="absolute left-2 top-2 z-10 flex items-center gap-1.5">
-        {/* Both the 2D map and the 3D globe render the shared layers, so the
-            per-pane layer-visibility toggle applies to either. */}
-        <PaneLayerToggle viewId={viewId} index={index} is3d={is3d} />
-        <button
-          type="button"
-          className="flex h-7 w-7 items-center justify-center rounded-md border border-input map-glass text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
-          aria-label={
-            is3d
-              ? t("mapGrid.show2d", { number: index + 2 })
-              : t("mapGrid.show3d", { number: index + 2 })
-          }
-          aria-pressed={is3d}
-          onClick={() => setSecondaryViewKind(viewId, is3d ? "maplibre" : "cesium")}
-        >
-          {is3d ? <MapIcon className="h-4 w-4" /> : <Globe className="h-4 w-4" />}
-        </button>
+        {/* Every renderer draws the shared layers, so the per-pane
+            layer-visibility toggle applies to each of them. */}
+        <PaneLayerToggle viewId={viewId} index={index} renderer={renderer} />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-input map-glass text-muted-foreground shadow-sm hover:bg-accent"
+              aria-label={t("mapGrid.renderingEngineLabel", { number: index + 2 })}
+            >
+              {is3d ? <Globe className="h-4 w-4" /> : <MapIcon className="h-4 w-4" />}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuRadioGroup
+              value={renderer}
+              onValueChange={(value) =>
+                setSecondaryViewKind(
+                  viewId,
+                  value === "cesium" || value === "mapbox" ? value : "maplibre",
+                )
+              }
+            >
+              <DropdownMenuRadioItem value="maplibre">
+                {t("toolbar.item.rendererMapLibre")}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="mapbox">
+                {t("toolbar.item.rendererMapbox")}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="cesium">
+                {t("toolbar.item.rendererCesium")}
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <button
           type="button"
           className="flex h-7 w-7 items-center justify-center rounded-md border border-input map-glass text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
@@ -179,18 +209,20 @@ function SecondaryMapPane({ viewId, index, cesiumToken }: SecondaryMapPaneProps)
 interface PaneLayerToggleProps {
   viewId: string;
   index: number;
-  /** When true this is a 3D-globe pane, so layers it can't render are flagged. */
-  is3d: boolean;
+  /** The pane's renderer, so layers it can't render are flagged. */
+  renderer: MapRendererKind;
 }
 
 /**
  * A dropdown of the shared layers with a checkbox each, controlling which layers
  * are visible in this pane. A layer's checkbox reflects its effective visibility
  * (the pane's override, or the primary map's visibility when not overridden). On
- * a 3D-globe pane, layer kinds the globe cannot render are tagged "2D only".
+ * a 3D-globe pane, layer kinds the globe cannot render are tagged "2D only"; on
+ * a Mapbox pane, layers its native adapter cannot compile are tagged too.
  */
-function PaneLayerToggle({ viewId, index, is3d }: PaneLayerToggleProps) {
+function PaneLayerToggle({ viewId, index, renderer }: PaneLayerToggleProps) {
   const { t } = useTranslation();
+  const is3d = renderer === "cesium";
   const layers = useAppStore((s) => s.layers);
   const layerVisibility = useAppStore(
     (s) => s.secondaryMapViews.find((p) => p.id === viewId)?.layerVisibility,
@@ -228,6 +260,7 @@ function PaneLayerToggle({ viewId, index, is3d }: PaneLayerToggleProps) {
             const visible = override === undefined ? layer.visible : override;
             const only2d = is3d && !isCesiumSupportedLayerType(layer);
             const only3d = !is3d && isCesiumOnlyLayer(layer);
+            const noMapbox = renderer === "mapbox" && !isMapboxSupportedLayer(layer);
             return (
               <DropdownMenuCheckboxItem
                 key={layer.id}
@@ -240,9 +273,9 @@ function PaneLayerToggle({ viewId, index, is3d }: PaneLayerToggleProps) {
                 onSelect={(event: Event) => event.preventDefault()}
               >
                 <span className="truncate">{layer.name}</span>
-                {only2d || only3d ? (
+                {only2d || only3d || noMapbox ? (
                   <span className="ms-auto shrink-0 ps-2 text-xs text-muted-foreground">
-                    {t(only2d ? "mapGrid.only2d" : "mapGrid.only3d")}
+                    {t(only2d ? "mapGrid.only2d" : only3d ? "mapGrid.only3d" : "mapGrid.noMapbox")}
                   </span>
                 ) : null}
               </DropdownMenuCheckboxItem>

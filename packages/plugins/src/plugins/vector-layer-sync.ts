@@ -14,6 +14,7 @@ import {
   documentLocale,
   resolveLabelNumberLocale,
 } from "@geolibre/core";
+import type { FeatureCollection } from "geojson";
 import type { PropertyValueSpecification } from "maplibre-gl";
 import type { VectorLayerInfo, VectorLayerOptions, VectorLayerStyle } from "maplibre-gl-vector";
 import { stacAssetAccessFromLayer, STAC_ASSET_ACCESS_METADATA_KEY } from "./stac-signing";
@@ -39,6 +40,19 @@ export type VectorSyncableControl = {
   setLayerVisibility: (id: string, visible: boolean) => void;
   setLayerStyle: (id: string, style: Partial<VectorLayerStyle>) => void;
 };
+
+const geometryReaders = new WeakMap<
+  VectorSyncableControl,
+  (info: VectorLayerInfo) => FeatureCollection | undefined
+>();
+
+/** Register the geometry backing a control rendered by a non-MapLibre engine. */
+export function setVectorGeometryReader(
+  control: VectorSyncableControl,
+  reader: (info: VectorLayerInfo) => FeatureCollection | undefined,
+): void {
+  geometryReaders.set(control, reader);
+}
 
 let syncedControl: VectorSyncableControl | null = null;
 let storeUnsubscribe: (() => void) | null = null;
@@ -248,6 +262,16 @@ export function syncVectorLayersToStore(
 
     for (const info of infos) {
       const layer = createVectorStoreLayer(info, panelCollapsed);
+      const geometryReader = geometryReaders.get(control);
+      if (geometryReader) {
+        layer.geojson = geometryReader(info);
+        // The globe draws the collection itself, so a tiled record takes the
+        // GeoJSON path: the drape never creates the control's DuckDB source.
+        if (layer.geojson) {
+          layer.type = "geojson";
+          layer.source = { ...layer.source, type: "geojson" };
+        }
+      }
       const existing = useAppStore.getState().layers.find((current) => current.id === layer.id);
 
       if (!existing) {
@@ -270,6 +294,9 @@ export function syncVectorLayersToStore(
       let metadata = stacAssetAccess
         ? { ...layer.metadata, [STAC_ASSET_ACCESS_METADATA_KEY]: stacAssetAccess }
         : layer.metadata;
+      const style = geometryReader
+        ? { ...existing.style, ...vectorStyleToLayerStyle(info) }
+        : existing.style;
       const source = stacAssetAccess
         ? { ...layer.source, url: stacAssetAccess.href }
         : layer.source;
@@ -286,6 +313,9 @@ export function syncVectorLayersToStore(
 
       if (
         existing.type !== layer.type ||
+        (geometryReader &&
+          (existing.geojson !== layer.geojson ||
+            !recordsEqual({ ...existing.style }, { ...style }))) ||
         existing.visible !== visible ||
         existing.opacity !== opacity ||
         existing.sourcePath !== sourcePath ||
@@ -301,7 +331,12 @@ export function syncVectorLayersToStore(
           // The web Save flow re-materializes embeddedGeoJSON fresh from the
           // control (getLayerGeoJSON), so it intentionally is not preserved.
           metadata,
-          ...(sourceChanged ? { geojson: undefined } : {}),
+          ...(geometryReader ? { style } : {}),
+          ...(geometryReader
+            ? { geojson: layer.geojson }
+            : sourceChanged
+              ? { geojson: undefined }
+              : {}),
           opacity,
           source,
           sourcePath,

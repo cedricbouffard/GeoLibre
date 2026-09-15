@@ -6,8 +6,20 @@ interface Entry {
   ownerPluginId?: string;
 }
 const registry = new Map<string, Entry>();
+/** One registered guidance block: its text and the plugin that owns it. */
+export interface AssistantGuidanceEntry {
+  text: string;
+  ownerPluginId?: string;
+}
+/** Keyed by owner + text so re-registering identical guidance replaces in place. */
+const guidanceRegistry = new Map<string, AssistantGuidanceEntry>();
+/** Shared by tools and guidance: the agent refreshes both when it changes. */
 let version = 0;
 const ownerScopes = new Map<string, { active: boolean }>();
+const OWNER_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+/** Upper bound on one guidance registration, so a plugin cannot crowd out the host prompt. */
+export const MAX_ASSISTANT_GUIDANCE_LENGTH = 4000;
 
 /** Internal lifecycle token: invalidated scopes remain stale after an owner is reused. */
 export function getAssistantToolOwnerScope(owner: string): { readonly active: boolean } {
@@ -25,7 +37,7 @@ export function getAssistantToolOwnerScope(owner: string): { readonly active: bo
  */
 export function registerAssistantTool(original: Tool, ownerPluginId?: string): () => void {
   const owner = ownerPluginId ?? "";
-  if (!/^[a-zA-Z0-9_-]+$/.test(original.name) || (owner && !/^[a-zA-Z0-9_-]+$/.test(owner))) {
+  if (!OWNER_PATTERN.test(original.name) || (owner && !OWNER_PATTERN.test(owner))) {
     throw new Error(
       "Assistant tool names and plugin IDs must use letters, digits, underscores or hyphens.",
     );
@@ -94,11 +106,50 @@ export function listAssistantTools(): Tool[] {
   return [...registry.values()].map((entry) => entry.tool);
 }
 
+/** Append guidance to the assistant's system prompt for as long as it stays registered.
+ * Tool descriptions are read only after the model has chosen a tool, so rules about
+ * *when* to call a plugin's tools belong here, next to the host's own guidelines.
+ * Identical text from the same owner replaces the earlier registration in place.
+ * Re-registration bumps the shared version so the agent refreshes before its next prompt.
+ */
+export function registerAssistantGuidance(text: string, ownerPluginId?: string): () => void {
+  const owner = ownerPluginId ?? "";
+  if (owner && !OWNER_PATTERN.test(owner)) {
+    throw new Error("Assistant plugin IDs must use letters, digits, underscores or hyphens.");
+  }
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  if (!trimmed) throw new Error("Assistant guidance must be a non-empty string.");
+  if (trimmed.length > MAX_ASSISTANT_GUIDANCE_LENGTH) {
+    throw new Error(
+      `Assistant guidance must be at most ${MAX_ASSISTANT_GUIDANCE_LENGTH} characters.`,
+    );
+  }
+  const key = `${owner.length}_${owner}_${trimmed}`;
+  const entry: AssistantGuidanceEntry = { text: trimmed, ownerPluginId };
+  guidanceRegistry.set(key, entry);
+  version++;
+  return () => {
+    if (guidanceRegistry.get(key) !== entry) return;
+    guidanceRegistry.delete(key);
+    version++;
+  };
+}
+
+/** Registered guidance in registration order, with its owner for attribution. */
+export function listAssistantGuidance(): AssistantGuidanceEntry[] {
+  return [...guidanceRegistry.values()].map(({ text, ownerPluginId }) => ({
+    text,
+    ...(ownerPluginId ? { ownerPluginId } : {}),
+  }));
+}
+
 export function getAssistantToolsVersion(): number {
   return version;
 }
 
-/** Host lifecycle cleanup, including failed activation and plugin removal. */
+/** Host lifecycle cleanup, including failed activation and plugin removal.
+ * Removes the owner's tools and guidance together: both live for one activation.
+ */
 export function unregisterAssistantToolsByOwner(ownerPluginId: string): void {
   const scope = ownerScopes.get(ownerPluginId);
   if (scope) scope.active = false;
@@ -106,6 +157,12 @@ export function unregisterAssistantToolsByOwner(ownerPluginId: string): void {
   for (const [name, entry] of registry) {
     if (entry.ownerPluginId === ownerPluginId) {
       registry.delete(name);
+      version++;
+    }
+  }
+  for (const [key, entry] of guidanceRegistry) {
+    if (entry.ownerPluginId === ownerPluginId) {
+      guidanceRegistry.delete(key);
       version++;
     }
   }

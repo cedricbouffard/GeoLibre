@@ -6,6 +6,7 @@ import {
 } from "@geolibre/core";
 import {
   BasemapControl,
+  DEFAULT_BASEMAPS,
   type BasemapChangeEvent,
   type BasemapDefinition,
   type BasemapControlEventPayload,
@@ -164,7 +165,7 @@ export const maplibreBasemapControlPlugin: GeoLibrePlugin = {
   id: BASEMAP_CONTROL_PLUGIN_ID,
   name: "Basemaps",
   version: "0.3.0",
-  engines: ["maplibre"],
+  engines: ["maplibre", "mapbox"],
   activate: (app: GeoLibreAppAPI) => {
     if (!basemapControl) {
       basemapControl = new BasemapControl(getBasemapControlOptions(app));
@@ -248,6 +249,22 @@ export const maplibreBasemapControlPlugin: GeoLibrePlugin = {
 
 function getBasemapControlOptions(app: GeoLibreAppAPI): BasemapControlOptions {
   return {
+    ...(app.getMapboxMap?.()
+      ? {
+          basemaps: [
+            {
+              id: "mapbox-standard",
+              name: "Mapbox Standard",
+              provider: "mapbox",
+              type: "style",
+              source: {
+                type: "style",
+                url: "https://api.mapbox.com/styles/v1/mapbox/standard?access_token={api-key}",
+              },
+            },
+          ],
+        }
+      : {}),
     collapsed: false,
     position: basemapControlPosition,
     title: "Basemaps",
@@ -405,6 +422,9 @@ function registerRasterBasemap(
     return;
   }
 
+  // Keep the provider-resolved source so Mapbox can restore the adopted layer
+  // after a style reload without requesting literal credential placeholders.
+  const nativeSource = app.getMapboxMap?.()?.getStyle()?.sources[managedRaster.sourceId];
   app.registerExternalNativeLayer({
     id: layerId,
     name: basemap.name,
@@ -416,7 +436,7 @@ function registerRasterBasemap(
       scheme: basemap.source.scheme,
       sourceId: managedRaster.sourceId,
       tileSize: basemap.source.tileSize ?? 256,
-      tiles: basemap.source.tiles,
+      tiles: nativeSource?.type === "raster" ? nativeSource.tiles : basemap.source.tiles,
       type: "raster",
     },
     nativeLayerIds: [managedRaster.layerId],
@@ -501,6 +521,17 @@ function normalizeBeforeId(value: string | undefined | null): string | undefined
 }
 
 function getBasemapIdForStyleUrl(url: string): string | undefined {
+  // Match both native Mapbox URLs from older projects and resolved catalog URLs.
+  const normalize = (value: string) =>
+    value.split("?")[0].replace("mapbox://styles/", "https://api.mapbox.com/styles/v1/");
+  if (normalize(url) === "https://api.mapbox.com/styles/v1/mapbox/standard")
+    return "mapbox-standard";
+  const match = DEFAULT_BASEMAPS.find(
+    ({ source }) =>
+      (source.type === "style" || source.type === "vector-style") &&
+      normalize(source.url) === normalize(url),
+  );
+  if (match) return match.id;
   if (url === "https://tiles.openfreemap.org/styles/positron") {
     return "openfreemap-positron";
   }

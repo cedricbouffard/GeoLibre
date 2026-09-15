@@ -314,7 +314,9 @@ function isGeoLibreSentinelStyleUrl(styleUrl: string | undefined): boolean {
   return Boolean(styleUrl?.startsWith("geolibre://"));
 }
 
-function resolveMapStyle(styleUrl: string | undefined): string | maplibregl.StyleSpecification {
+export function resolveMapStyle(
+  styleUrl: string | undefined,
+): string | maplibregl.StyleSpecification {
   if (styleUrl === BLANK_BASEMAP) return createBlankMapStyle();
   const offline = getOfflineBasemapStyle(styleUrl);
   // Return a fresh copy (like the planetary path below builds a new object each

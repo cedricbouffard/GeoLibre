@@ -1,0 +1,713 @@
+import assert from "node:assert/strict";
+import { beforeEach, describe, it } from "node:test";
+import { parseHTML } from "linkedom";
+import type * as mapboxgl from "mapbox-gl";
+import type { MapPreferences } from "@geolibre/core";
+import { MapboxEngine } from "../packages/map/src/mapbox-engine";
+import { isMapboxSupportedLayer } from "../packages/map/src/mapbox-layers";
+import { geojsonLayer } from "./helpers/layer-fixtures";
+
+// The Mapbox engine never loads mapbox-gl here (its import in the module under
+// test is type-only), so the map is a fake that records the style-spec calls
+// the engine makes. What is exercised is the engine's own state diffing: which
+// sources and layers it adds, updates and removes on successive syncLayers
+// calls, how it keeps the error record honest, how it resolves queried
+// features back to the app's feature identity, and which camera and
+// preference writes it forwards.
+
+type Handler = (event?: unknown) => void;
+
+/** A minimal mapbox-gl `Map`: just what the engine touches. */
+function makeMap() {
+  const sources = new Map<string, Record<string, unknown>>();
+  const layers: Record<string, unknown>[] = [];
+  const handlers = new Map<string, Set<Handler>>();
+  const calls: string[] = [];
+  const controls: unknown[] = [];
+  let styleLoaded = true;
+  let center: [number, number] = [0, 0];
+  let zoom = 2;
+  let bearing = 0;
+  let pitch = 0;
+  let queried: Record<string, unknown>[] = [];
+  const map = {
+    // Test hooks.
+    sources,
+    layers,
+    calls,
+    controls,
+    setStyleLoaded: (value: boolean) => {
+      styleLoaded = value;
+    },
+    setQueried: (features: Record<string, unknown>[]) => {
+      queried = features;
+    },
+    fire: (event: string, payload?: unknown) => {
+      for (const handler of handlers.get(event) ?? []) handler(payload);
+    },
+    // mapbox-gl surface.
+    on: (event: string, handler: Handler) => {
+      if (!handlers.has(event)) handlers.set(event, new Set());
+      handlers.get(event)!.add(handler);
+    },
+    off: (event: string, handler: Handler) => {
+      handlers.get(event)?.delete(handler);
+    },
+    once: (event: string, handler: Handler) => {
+      const wrapped: Handler = (payload) => {
+        handlers.get(event)?.delete(wrapped);
+        handler(payload);
+      };
+      map.on(event, wrapped);
+    },
+    isStyleLoaded: () => styleLoaded,
+    loaded: () => true,
+    areTilesLoaded: () => true,
+    getStyle: () => ({ layers: [{ id: "background", type: "background" }] }),
+    getCanvas: () => ({}) as HTMLCanvasElement,
+    getContainer: () => ({ querySelector: () => null }) as unknown as HTMLElement,
+    project: (p: [number, number]) => ({ x: p[0], y: p[1] }),
+    unproject: (p: [number, number]) => ({ lng: p[0], lat: p[1] }),
+    triggerRepaint: () => {},
+    addControl: (control: unknown) => {
+      controls.push(control);
+    },
+    removeControl: (control: unknown) => {
+      controls.splice(controls.indexOf(control), 1);
+    },
+    hasControl: (control: unknown) => controls.includes(control),
+    getSource: (id: string) =>
+      sources.has(id)
+        ? {
+            setData: (data: unknown) => {
+              calls.push(`setData:${id}`);
+              sources.set(id, { ...sources.get(id)!, data });
+            },
+          }
+        : undefined,
+    addSource: (id: string, spec: Record<string, unknown>) => {
+      calls.push(`addSource:${id}`);
+      sources.set(id, spec);
+    },
+    removeSource: (id: string) => {
+      calls.push(`removeSource:${id}`);
+      sources.delete(id);
+    },
+    getLayer: (id: string) => layers.find((l) => l.id === id),
+    addLayer: (spec: Record<string, unknown>) => {
+      calls.push(`addLayer:${spec.id}`);
+      layers.push(spec);
+    },
+    removeLayer: (id: string) => {
+      calls.push(`removeLayer:${id}`);
+      layers.splice(
+        layers.findIndex((l) => l.id === id),
+        1,
+      );
+    },
+    moveLayer: (id: string) => {
+      const index = layers.findIndex((l) => l.id === id);
+      layers.push(...layers.splice(index, 1));
+    },
+    setPaintProperty: (id: string, key: string, value: unknown) => {
+      calls.push(`setPaintProperty:${id}:${key}`);
+      const layer = layers.find((l) => l.id === id)!;
+      layer.paint = { ...(layer.paint as Record<string, unknown>), [key]: value };
+    },
+    setLayoutProperty: (id: string, key: string, value: unknown) => {
+      calls.push(`setLayoutProperty:${id}:${key}`);
+      const layer = layers.find((l) => l.id === id)!;
+      layer.layout = { ...(layer.layout as Record<string, unknown>), [key]: value };
+    },
+    setFilter: (id: string) => {
+      calls.push(`setFilter:${id}`);
+    },
+    setLayerZoomRange: (id: string) => {
+      calls.push(`setLayerZoomRange:${id}`);
+    },
+    queryRenderedFeatures: () => queried,
+    getCenter: () => ({ toArray: () => center }),
+    getZoom: () => zoom,
+    getBearing: () => bearing,
+    getPitch: () => pitch,
+    getBounds: () => ({
+      getWest: () => -10,
+      getSouth: () => -5,
+      getEast: () => 10,
+      getNorth: () => 5,
+    }),
+    jumpTo: (view: { center: [number, number]; zoom: number; bearing: number; pitch: number }) => {
+      calls.push("jumpTo");
+      ({ center, zoom, bearing, pitch } = view);
+    },
+    flyTo: (view: { center: [number, number]; zoom: number; pitch?: number }) => {
+      calls.push(`flyTo:${JSON.stringify(view)}`);
+      center = view.center;
+      zoom = view.zoom;
+      if (view.pitch !== undefined) pitch = view.pitch;
+    },
+    setMinZoom: (v: number) => calls.push(`setMinZoom:${v}`),
+    setMaxZoom: (v: number) => calls.push(`setMaxZoom:${v}`),
+    getMaxZoom: () => 18,
+    setMaxPitch: (v: number) => calls.push(`setMaxPitch:${v}`),
+    setMaxBounds: (v: unknown) => calls.push(`setMaxBounds:${JSON.stringify(v ?? null)}`),
+    setRenderWorldCopies: (v: boolean) => calls.push(`setRenderWorldCopies:${v}`),
+    setProjection: (v: string) => calls.push(`setProjection:${v}`),
+    setTerrain: (v: unknown) => calls.push(`setTerrain:${JSON.stringify(v)}`),
+    stop: () => {},
+    remove: () => calls.push("remove"),
+  };
+  return map;
+}
+
+class FakeControl {}
+const gl = {
+  NavigationControl: FakeControl,
+  FullscreenControl: FakeControl,
+  ScaleControl: FakeControl,
+  AttributionControl: FakeControl,
+} as unknown as typeof mapboxgl.default;
+
+const SOURCE = "geolibre-mapbox-layer-a";
+const FILL = `${SOURCE}-geojson-fill`;
+const LINE = `${SOURCE}-geojson-line`;
+const CIRCLE = `${SOURCE}-geojson-circle`;
+
+function makeEngine(map = makeMap()) {
+  const engine = new MapboxEngine(map as unknown as mapboxgl.Map, gl);
+  return { engine, map };
+}
+
+describe("MapboxEngine construction", () => {
+  it("lets plugin panels locate their Mapbox control corner", () => {
+    const { engine, map } = makeEngine();
+    const { document } = parseHTML(
+      '<div id="map"><div class="mapboxgl-ctrl-top-left"></div></div>',
+    );
+    const container = document.getElementById("map")!;
+    map.getContainer = () => container;
+    const element = document.createElement("div");
+    const control = {
+      onAdd() {
+        // The plugin's position detector runs during its mount lifecycle.
+        assert.ok(container.querySelector(".maplibregl-ctrl-top-left"));
+        return element;
+      },
+      onRemove() {},
+    };
+    assert.equal(engine.addControl(control, "top-left"), true);
+    const adapter = map.controls.at(-1) as mapboxgl.IControl;
+    assert.equal(adapter.onAdd(map as unknown as mapboxgl.Map), element);
+    assert.ok(element.classList.contains("mapboxgl-ctrl"));
+    engine.addControl(control, "top-left");
+    assert.equal(map.controls.filter((c) => c === adapter).length, 1);
+    engine.removeControl(control);
+    assert.ok(!map.controls.includes(adapter));
+  });
+  it("mounts the built-in controls and takes the style's layers as the basemap", () => {
+    const { engine, map } = makeEngine();
+    assert.equal(map.controls.length, 4);
+    assert.deepEqual(engine.getBasemapStyleLayerIds(), ["background"]);
+    assert.equal(engine.getMap(), null);
+    assert.equal(engine.getMapboxMap(), map as unknown as mapboxgl.Map);
+  });
+  it("keeps the attribution control mounted", () => {
+    const { engine, map } = makeEngine();
+    assert.equal(engine.setBuiltInControlVisible("attribution", false), false);
+    assert.equal(map.controls.length, 4);
+    assert.equal(engine.setBuiltInControlVisible("scale", false), true);
+    assert.equal(map.controls.length, 3);
+    assert.equal(engine.setBuiltInControlVisible("scale", true), true);
+    assert.equal(map.controls.length, 4);
+  });
+  it("detaches every listener on destroy", () => {
+    const { engine, map } = makeEngine();
+    engine.destroy();
+    assert.ok(map.calls.includes("remove"));
+    map.setStyleLoaded(true);
+    // A late style.load must not reach a destroyed engine.
+    map.fire("style.load");
+    assert.equal(engine.getRenderSurface(), null);
+  });
+});
+
+describe("MapboxEngine.syncLayers", () => {
+  let engine: MapboxEngine;
+  let map: ReturnType<typeof makeMap>;
+  beforeEach(() => {
+    ({ engine, map } = makeEngine());
+    map.calls.length = 0;
+  });
+
+  it("adds a GeoJSON source and its fill, line and circle layers", () => {
+    engine.syncLayers([geojsonLayer()]);
+    assert.ok(map.sources.has(SOURCE));
+    assert.deepEqual(
+      map.layers.map((l) => l.id),
+      [FILL, LINE, CIRCLE],
+    );
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+  });
+
+  it("defers the sync until the style has loaded and flushes on idle", () => {
+    map.setStyleLoaded(false);
+    engine.syncLayers([geojsonLayer()]);
+    assert.equal(map.sources.size, 0);
+    map.setStyleLoaded(true);
+    map.fire("idle");
+    assert.ok(map.sources.has(SOURCE));
+    map.calls.length = 0;
+    // Nothing is pending any more, so the next idle is a no-op.
+    map.fire("idle");
+    assert.deepEqual(map.calls, []);
+  });
+
+  it("updates changed paint in place instead of rebuilding the layer", () => {
+    const layer = geojsonLayer();
+    engine.syncLayers([layer]);
+    map.calls.length = 0;
+    engine.syncLayers([{ ...layer, style: { ...layer.style, fillColor: "#ff0000" } }]);
+    assert.ok(map.calls.some((c) => c === `setPaintProperty:${FILL}:fill-color`));
+    assert.ok(!map.calls.some((c) => c.startsWith("addLayer:")));
+    assert.ok(!map.calls.some((c) => c.startsWith("setData:")));
+  });
+
+  it("pushes new GeoJSON through setData rather than recreating the source", () => {
+    const layer = geojsonLayer();
+    engine.syncLayers([layer]);
+    map.calls.length = 0;
+    engine.syncLayers([
+      {
+        ...layer,
+        geojson: {
+          type: "FeatureCollection",
+          features: [
+            { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [1, 2] } },
+          ],
+        },
+      },
+    ]);
+    assert.deepEqual(
+      map.calls.filter((c) => c.startsWith("setData:") || c.includes("Source:")),
+      [`setData:${SOURCE}`],
+    );
+  });
+
+  it("orders the map layers to match the store, topmost first", () => {
+    const a = geojsonLayer({ id: "a" });
+    const b = geojsonLayer({ id: "b" });
+    engine.syncLayers([a, b]);
+    const order = () => map.layers.map((l) => String(l.id).replace(/-geojson-.*$/, ""));
+    // The store lists `a` on top, so `b` is added first (below).
+    assert.deepEqual(order().slice(0, 3), Array(3).fill("geolibre-mapbox-b"));
+    engine.syncLayers([b, a]);
+    assert.deepEqual(order().slice(0, 3), Array(3).fill("geolibre-mapbox-a"));
+  });
+
+  it("removes the source and layers of a layer that left the store", () => {
+    engine.syncLayers([geojsonLayer()]);
+    engine.syncLayers([]);
+    assert.equal(map.sources.size, 0);
+    assert.equal(map.layers.length, 0);
+  });
+
+  it("reports a visible layer the adapter cannot compile and clears it on removal", () => {
+    const layer = geojsonLayer({
+      id: "cog",
+      name: "Elevation",
+      type: "cog",
+      source: { type: "raster", url: "cog://tiles/elevation.tif" },
+      geojson: undefined,
+    });
+    engine.syncLayers([layer]);
+    assert.equal(engine.getRenderStatus().errors.length, 1);
+    assert.match(engine.getRenderStatus().errors[0], /^Elevation: /);
+    // A hidden layer has nothing on the map to report.
+    engine.syncLayers([{ ...layer, visible: false }]);
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+    engine.syncLayers([layer]);
+    engine.syncLayers([]);
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+  });
+
+  it("leaves plugin-managed rasters to their renderer without unsupported-layer errors", () => {
+    const layer = geojsonLayer({
+      id: "campus",
+      type: "cog",
+      geojson: undefined,
+      source: { type: "raster", url: "https://example.com/campus.tif" },
+      metadata: { sourceKind: "maplibre-gl-raster", externalNativeLayer: true },
+    });
+    map.addLayer({ id: layer.id, type: "custom" });
+    engine.syncLayers([layer]);
+    assert.equal(isMapboxSupportedLayer(layer), true);
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+    assert.equal(map.sources.size, 0);
+    assert.ok(map.getLayer(layer.id));
+    engine.syncLayers([{ ...layer, opacity: 0.5 }]);
+    engine.syncLayers([]);
+    assert.ok(map.getLayer(layer.id), "the plugin owns teardown too");
+  });
+
+  it("drops a source error once the source loads or its layer is removed", () => {
+    engine.syncLayers([geojsonLayer()]);
+    map.fire("error", { error: new Error("tile 404"), sourceId: SOURCE });
+    assert.deepEqual(engine.getRenderStatus().errors, ["tile 404"]);
+    // Metadata and visibility events are not a recovery.
+    map.fire("sourcedata", { sourceId: SOURCE, sourceDataType: "metadata", isSourceLoaded: true });
+    map.fire("sourcedata", { sourceId: SOURCE, sourceDataType: "content", isSourceLoaded: false });
+    assert.equal(engine.getRenderStatus().errors.length, 1);
+    map.fire("sourcedata", { sourceId: SOURCE, sourceDataType: "content", isSourceLoaded: true });
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+
+    map.fire("error", { error: new Error("tile 404"), sourceId: SOURCE });
+    engine.syncLayers([]);
+    assert.deepEqual(engine.getRenderStatus().errors, []);
+  });
+
+  it("redacts tokens from engine errors", () => {
+    map.fire("error", {
+      error: new Error("https://api.mapbox.com/x?access_token=pk.secret failed"),
+    });
+    assert.deepEqual(engine.getRenderStatus().errors, [
+      "https://api.mapbox.com/x?access_token=[redacted] failed",
+    ]);
+  });
+
+  it("labels with the font the loaded basemap style uses", () => {
+    const layer = geojsonLayer();
+    layer.style = {
+      ...layer.style,
+      labels: { ...layer.style.labels, enabled: true, field: "name" },
+    };
+    engine.syncLayers([layer]);
+    const font = () =>
+      (map.layers.find((l) => l.type === "symbol")?.layout as Record<string, unknown>)?.[
+        "text-font"
+      ];
+    // The fake style has no symbol layer, so the Mapbox default applies.
+    assert.deepEqual(font(), ["Open Sans Regular"]);
+    map.getStyle = () => ({
+      layers: [
+        { id: "background", type: "background" },
+        {
+          id: "place",
+          type: "symbol",
+          layout: { "text-field": "{name}", "text-font": ["Noto Sans Regular"] },
+        },
+      ],
+    });
+    map.fire("style.load");
+    assert.deepEqual(font(), ["Noto Sans Regular"]);
+  });
+
+  it("rebuilds everything after a style swap", () => {
+    engine.syncLayers([geojsonLayer()]);
+    map.sources.clear();
+    map.layers.length = 0;
+    map.fire("style.load");
+    assert.ok(map.sources.has(SOURCE));
+    assert.equal(map.layers.length, 3);
+  });
+});
+
+describe("MapboxEngine.identifyFeatures", () => {
+  it("maps Mapbox's generated ids back to the layer's own feature identity", () => {
+    const { engine, map } = makeEngine();
+    const feature = (id: string | undefined, name: string) => ({
+      type: "Feature" as const,
+      ...(id === undefined ? {} : { id }),
+      properties: { name },
+      geometry: { type: "Point" as const, coordinates: [0, 0] },
+    });
+    engine.syncLayers([
+      geojsonLayer({
+        geojson: {
+          type: "FeatureCollection",
+          features: [feature("ca", "California"), feature(undefined, "Nevada")],
+        },
+      }),
+    ]);
+    // `generateId` makes Mapbox report the feature's index as its id, and a
+    // polygon spanning two tiles comes back twice.
+    map.setQueried([
+      { id: 0, layer: { id: FILL }, properties: { name: "California" }, geometry: null },
+      { id: 0, layer: { id: LINE }, properties: { name: "California" }, geometry: null },
+      { id: 1, layer: { id: CIRCLE }, properties: { name: "Nevada" }, geometry: null },
+    ]);
+    const found = engine.identifyFeatures([0, 0]);
+    assert.deepEqual(
+      found.map((f) => [f.layerId, f.featureId]),
+      [
+        ["layer-a", "ca"],
+        ["layer-a", "1"],
+      ],
+    );
+    assert.deepEqual(engine.identifyFeatures([0, 0], "other"), []);
+  });
+});
+
+describe("MapboxEngine camera and preferences", () => {
+  it("reads the camera and skips a jump that changes nothing", () => {
+    const { engine, map } = makeEngine();
+    const view = engine.readView();
+    assert.deepEqual(view.center, [0, 0]);
+    assert.deepEqual(view.bbox, [-10, -5, 10, 5]);
+    map.calls.length = 0;
+    engine.applyView({ center: [0, 0], zoom: 2, bearing: 0, pitch: 0 });
+    assert.deepEqual(map.calls, []);
+    engine.applyView({ center: [10, 20], zoom: 5, bearing: 30, pitch: 40 });
+    assert.deepEqual(map.calls, ["jumpTo"]);
+    assert.deepEqual(engine.readView().center, [10, 20]);
+    assert.equal(engine.readView().bearing, 30);
+  });
+
+  it("tilts into a tileset on zoom-to-layer, like the MapLibre engine", () => {
+    const { engine, map } = makeEngine();
+    const tileset = {
+      ...geojsonLayer(),
+      geojson: undefined,
+      type: "3d-tiles" as const,
+      source: { url: "https://example.com/tileset.json" },
+      metadata: {
+        externalNativeLayer: true,
+        sourceKind: "3d-tiles-url",
+        center: [-75, 40],
+        zoom: 15,
+      },
+    };
+    map.calls.length = 0;
+    engine.fitLayer(tileset);
+    assert.deepEqual(map.calls, ['flyTo:{"center":[-75,40],"zoom":15,"pitch":60}']);
+    // An already steeper camera is kept, and a point cloud is not tilted.
+    map.jumpTo({ center: [-75, 40], zoom: 15, bearing: 0, pitch: 70 });
+    engine.fitLayer(tileset);
+    assert.equal(map.calls.at(-1), 'flyTo:{"center":[-75,40],"zoom":15,"pitch":70}');
+    engine.fitLayer({
+      ...tileset,
+      type: "lidar",
+      metadata: { ...tileset.metadata, sourceKind: "lidar-url", zoom: undefined },
+    });
+    assert.equal(map.calls.at(-1), 'flyTo:{"center":[-75,40],"zoom":16}');
+    engine.fitLayer({ ...tileset, metadata: { externalNativeLayer: true, center: "nowhere" } });
+    assert.equal(map.calls.length, 4);
+  });
+
+  it("clamps a saved camera to the project preferences before moving", () => {
+    const { engine, map } = makeEngine();
+    engine.applyMapPreferences({
+      minZoom: 3,
+      maxZoom: 12,
+      maxPitch: 60,
+      bounds: [-180, -90, 180, 90],
+      restrictBounds: false,
+      renderWorldCopies: false,
+      projection: "mercator",
+      terrainEnabled: false,
+    } as unknown as MapPreferences);
+    map.calls.length = 0;
+    engine.applyView({ center: [200, 89], zoom: 18, bearing: 10, pitch: 80 });
+    assert.deepEqual(map.calls, ["jumpTo"]);
+    const view = engine.readView();
+    assert.deepEqual(view.center, [180, 85]);
+    assert.equal(view.zoom, 12);
+    assert.equal(view.pitch, 60);
+    assert.equal(view.bearing, 10);
+    engine.applyView({ center: [0, 0], zoom: 1, bearing: 0, pitch: 0 });
+    assert.equal(engine.readView().zoom, 3);
+  });
+
+  it("applies zoom, pitch, bounds, projection and terrain preferences", () => {
+    const { engine, map } = makeEngine();
+    map.calls.length = 0;
+    const preferences = {
+      minZoom: 3,
+      maxZoom: 40,
+      maxPitch: 90,
+      bounds: [-1, -2, 3, 4],
+      restrictBounds: true,
+      renderWorldCopies: false,
+      projection: "globe",
+      terrainEnabled: true,
+    } as unknown as MapPreferences;
+    engine.applyMapPreferences(preferences);
+    // Constraints are cleared before the new interval is applied, and the
+    // out-of-range values are clamped.
+    assert.deepEqual(map.calls.slice(0, 4), [
+      "setMinZoom:0",
+      "setMaxZoom:24",
+      "setMaxZoom:24",
+      "setMinZoom:3",
+    ]);
+    assert.ok(map.calls.includes("setMaxPitch:85"));
+    assert.ok(map.calls.includes("setMaxBounds:[[-1,-2],[3,4]]"));
+    assert.ok(map.calls.includes("setRenderWorldCopies:false"));
+    assert.ok(map.calls.includes("setProjection:globe"));
+    assert.ok(map.sources.has("geolibre-mapbox-dem"));
+    assert.ok(map.calls.includes('setTerrain:{"source":"geolibre-mapbox-dem","exaggeration":1}'));
+    assert.equal(engine.isTerrainEnabled(), true);
+
+    map.calls.length = 0;
+    engine.applyMapPreferences({ ...preferences, restrictBounds: false, terrainEnabled: false });
+    assert.ok(map.calls.includes("setMaxBounds:null"));
+    assert.ok(map.calls.includes("setTerrain:null"));
+  });
+
+  it("re-applies the remembered preferences after a style swap", () => {
+    const { engine, map } = makeEngine();
+    engine.applyMapPreferences({
+      minZoom: 3,
+      maxZoom: 12,
+      maxPitch: 60,
+      bounds: [-1, -2, 3, 4],
+      restrictBounds: false,
+      renderWorldCopies: true,
+      projection: "mercator",
+      terrainEnabled: false,
+    } as unknown as MapPreferences);
+    map.calls.length = 0;
+    map.fire("style.load");
+    assert.ok(map.calls.includes("setMinZoom:3"));
+    assert.ok(map.calls.includes("setMaxZoom:12"));
+  });
+});
+
+describe("Mapbox shared raster basemaps", () => {
+  it("adopts the control layer, updates visibility and removes it without duplicates", () => {
+    const { engine, map } = makeEngine();
+    const sourceId = "maplibre-basemap-control-source-osm";
+    const layerId = "osm";
+    const source = {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+    };
+    map.addSource(sourceId, source);
+    map.addLayer({ id: layerId, type: "raster", source: sourceId });
+    const layer = {
+      ...geojsonLayer({ id: "basemap-osm" }),
+      type: "raster" as const,
+      geojson: undefined,
+      source,
+      metadata: { sourceKind: "maplibre-basemap-control", sourceId, nativeLayerIds: [layerId] },
+    };
+    engine.syncLayers([layer]);
+    assert.equal(map.sources.size, 1);
+    assert.equal(map.layers.length, 1);
+    engine.syncLayers([{ ...layer, visible: false, opacity: 0.4 }]);
+    assert.equal((map.getLayer(layerId)?.layout as Record<string, unknown>).visibility, "none");
+    engine.syncLayers([]);
+    assert.equal(map.sources.size, 0);
+    assert.equal(map.layers.length, 0);
+  });
+});
+
+describe("Mapbox ArcGIS vector tile services", () => {
+  it("preserves service styling and manages every source through updates and removal", () => {
+    const { engine, map } = makeEngine();
+    const layer = geojsonLayer({ id: "arcgis-test" });
+    layer.type = "arcgis";
+    delete layer.geojson;
+    layer.opacity = 0.5;
+    layer.source = {
+      arcgisSources: {
+        parcels: {
+          type: "vector",
+          url: "https://example.com/VectorTileServer/",
+          tiles: ["https://example.com/VectorTileServer/tile/{z}/{y}/{x}.pbf"],
+        },
+        boundaries: { type: "vector", tiles: ["https://example.com/boundaries/{z}/{x}/{y}.pbf"] },
+      },
+      arcgisLayers: [
+        {
+          id: "parcels-fill",
+          type: "fill",
+          source: "parcels",
+          "source-layer": "parcels",
+          filter: ["==", "_symbol", 0],
+          minzoom: 11,
+          maxzoom: 18,
+          paint: { "fill-color": "#ffff00", "fill-opacity": 0.8 },
+        },
+        {
+          id: "boundaries-line",
+          type: "line",
+          source: "boundaries",
+          "source-layer": "boundaries",
+          paint: { "line-color": "#ff0000" },
+        },
+      ],
+    };
+    layer.metadata = { nativeLayerIds: ["parcels-fill", "boundaries-line"] };
+    assert.equal(isMapboxSupportedLayer(layer), true);
+    engine.syncLayers([layer]);
+    assert.equal(map.sources.size, 2);
+    assert.equal(map.sources.get("parcels")?.url, undefined);
+    const fill = map.layers.find((l) => l.id === "parcels-fill")!;
+    assert.deepEqual(fill.filter, ["==", "_symbol", 0]);
+    assert.equal(fill.minzoom, 11);
+    assert.deepEqual(fill.paint, { "fill-color": "#ffff00", "fill-opacity": 0.4 });
+    engine.syncLayers([{ ...layer, visible: false }]);
+    assert.equal(
+      (map.layers.find((l) => l.id === "parcels-fill")!.layout as { visibility: string })
+        .visibility,
+      "none",
+    );
+    engine.syncLayers([]);
+    assert.equal(map.sources.size, 0);
+    assert.equal(map.layers.length, 0);
+  });
+
+  it("rejects a source whose tile templates were never resolved", () => {
+    const { engine, map } = makeEngine();
+    const layer = geojsonLayer({ id: "arcgis-no-tiles" });
+    layer.type = "arcgis";
+    delete layer.geojson;
+    layer.source = {
+      // The REST service URL alone is not a TileJSON manifest Mapbox can fetch.
+      arcgisSources: { parcels: { type: "vector", url: "https://example.com/VectorTileServer/" } },
+      arcgisLayers: [
+        { id: "parcels-fill", type: "fill", source: "parcels", "source-layer": "parcels" },
+      ],
+    };
+    layer.metadata = { nativeLayerIds: ["parcels-fill"] };
+    assert.equal(isMapboxSupportedLayer(layer), false);
+    engine.syncLayers([layer]);
+    assert.equal(map.sources.size, 0);
+    assert.equal(map.layers.length, 0);
+    assert.match(engine.getRenderStatus().errors[0] ?? "", /tile templates/);
+  });
+});
+
+it("retries a Standard visibility change made while its opacity update is loading", () => {
+  const { engine, map } = makeEngine();
+  engine.setBlankBackgroundColor("#ffffff");
+  const config: Record<string, unknown> = {
+    geolibreBasemapOpacity: 1,
+    geolibreBlankColor: "#ffffff",
+  };
+  Object.assign(map, {
+    getConfigProperty: (_id: string, key: string) => config[key],
+    setConfigProperty: (_id: string, key: string, value: unknown) => {
+      config[key] = value;
+      map.setStyleLoaded(false);
+    },
+  });
+  map.getStyle = () => ({
+    layers: [],
+    imports: [
+      {
+        id: "basemap",
+        url: "mapbox://styles/mapbox/standard",
+        data: { schema: { geolibreBasemapOpacity: { type: "number", default: 1 } } },
+      },
+    ],
+  });
+  map.fire("style.load");
+  engine.setBasemapOpacity(0.5);
+  engine.setBasemapVisible(false);
+  assert.equal(config.geolibreBasemapOpacity, 0.5);
+  map.setStyleLoaded(true);
+  map.fire("idle");
+  assert.equal(config.geolibreBasemapOpacity, 0);
+});

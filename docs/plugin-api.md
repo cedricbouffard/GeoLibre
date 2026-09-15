@@ -1129,6 +1129,54 @@ The assistant refreshes its tools before the next prompt while retaining its
 conversation history. Plugin callbacks execute plugin-authored code, like a
 panel button; they should use the app API to update layers and other app state.
 
+### Assistant guidance
+
+A tool's description is read only after the model has already decided which
+tool to call; that decision is driven by the system prompt. When a plugin's
+tools need rules about *when* to use them (for example, "call
+`get_pm25_ranking` directly, never as a table function inside `run_sql`"),
+register that text as guidance and the host appends it to the assistant's
+system prompt:
+
+```js
+let disposeGuidance;
+
+export default {
+  id: "air-quality",
+  name: "Air quality",
+  version: "1.0.0",
+  activate(app) {
+    // ...register tools as above...
+    disposeGuidance = app.registerAssistantGuidance?.(
+      [
+        "For PM2.5 questions, call plugin_11_air-quality_get_pm25_ranking directly",
+        "with its own arguments. Never wrap it in run_sql or use it as a FROM clause;",
+        "it is not a SQL table function.",
+      ].join(" "),
+    );
+  },
+  deactivate() {
+    disposeGuidance?.();
+    disposeGuidance = undefined;
+  },
+};
+```
+
+Guidance is appended under a `Plugin guidance:` heading after GeoLibre's own
+prompt, in registration order, each block labelled `[plugin <id>]` with the
+plugin that registered it, and never replaces or edits the host text. The
+heading tells the model the text only governs when and how to call the plugin's
+own tools and that the host guidelines still apply. The text itself is not
+filtered: like plugin code, it is trusted once the plugin is loaded, so only
+install plugins you trust. It must be a non-empty string of at most 4000 characters; identical text from the
+same plugin replaces the earlier registration instead of repeating it. Like
+tools, guidance is activation-only: the host injects the plugin owner, ignores
+any owner argument a plugin supplies, removes the text on deactivation, failed
+activation, and plugin removal, and the app handed to the other lifecycle
+callbacks omits the method. The assistant recomposes its system prompt together
+with its tools before the next prompt, keeping the conversation history.
+Feature-detect the method for older hosts.
+
 The host exposes `app.getMapRenderer()` to read the current primary renderer.
 Engine declarations are enforced by the plugin manager for activation, URL
 parameters, project restoration, and delayed control registration, as well as

@@ -326,7 +326,7 @@ export function parseProject(json: string): GeoLibreProject {
     // The primary renderer is independent of the grid, so it sits outside the
     // `mapLayout` block above: a 1x1 Cesium project has no grid to persist.
     ...(normalizePrimaryRenderer(data.primaryRenderer)
-      ? { primaryRenderer: "cesium" as const }
+      ? { primaryRenderer: normalizePrimaryRenderer(data.primaryRenderer)! }
       : {}),
     ...(styleLibrary.length > 0 ? { styleLibrary } : {}),
     ...(parsedComments.length > 0 ? { comments: parsedComments } : {}),
@@ -932,11 +932,11 @@ export function normalizeMapLayout(value: unknown): MapGridLayout | null {
  * Returns null for the default 2D map — absent, unknown, or an explicit
  * `"maplibre"` — because the field is only written when it is not the default,
  * so a MapLibre project serializes byte-identically to before this existed.
- * The return type is narrowed to `"cesium" | null` rather than the full
+ * The return type is narrowed to `"cesium" | "mapbox" | null` rather than the full
  * {@link MapRendererKind} for that reason: `"maplibre"` is never a result.
  */
-export function normalizePrimaryRenderer(value: unknown): "cesium" | null {
-  return value === "cesium" ? "cesium" : null;
+export function normalizePrimaryRenderer(value: unknown): "cesium" | "mapbox" | null {
+  return value === "cesium" || value === "mapbox" ? value : null;
 }
 
 /**
@@ -958,7 +958,9 @@ export function normalizeSecondaryMapViews(value: unknown): SecondaryMapView[] |
     // Only the known engine ids survive; an absent/unknown value is omitted so
     // the pane defaults to the 2D map (back-compat with pre-globe projects).
     const viewKind =
-      candidate.viewKind === "cesium" || candidate.viewKind === "maplibre"
+      candidate.viewKind === "cesium" ||
+      candidate.viewKind === "maplibre" ||
+      candidate.viewKind === "mapbox"
         ? candidate.viewKind
         : undefined;
     views.push({
@@ -1222,6 +1224,10 @@ function normalizeProjectPreferences(preferences: unknown): ProjectPreferences {
         (map as Partial<ProjectPreferences["map"]>).showPointerElevation,
         DEFAULT_PROJECT_PREFERENCES.map.showPointerElevation,
       ),
+      // Missing means follow the saved project basemap. Do not reapply the
+      // new-project Streets default after a user has selected a shared style.
+      mapboxStyleUrl:
+        normalizeString((map as Partial<ProjectPreferences["map"]>).mapboxStyleUrl) || undefined,
       cesiumBasemap: normalizeCesiumBasemap(
         (map as Partial<ProjectPreferences["map"]>).cesiumBasemap,
       ),
@@ -1662,7 +1668,7 @@ export function projectFromStore(state: {
     // a single-pane Cesium project persists `primaryRenderer` with no
     // `mapLayout`, and a MapLibre project writes neither.
     ...(normalizePrimaryRenderer(state.primaryRenderer)
-      ? { primaryRenderer: "cesium" as const }
+      ? { primaryRenderer: normalizePrimaryRenderer(state.primaryRenderer)! }
       : {}),
     ...(styleLibrary.length > 0 ? { styleLibrary } : {}),
     ...(comments.length > 0 ? { comments } : {}),

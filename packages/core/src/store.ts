@@ -223,6 +223,21 @@ export interface GpsStatusFix {
   timestamp: number;
 }
 
+/** An explicit background choice replaces the active renderer's override. */
+function preferencesForBasemap(state: AppState, ellipsoidId = state.preferences.map.ellipsoidId) {
+  const clearMapbox =
+    state.primaryRenderer === "mapbox" && state.preferences.map.mapboxStyleUrl !== undefined;
+  if (!clearMapbox && ellipsoidId === state.preferences.map.ellipsoidId) return state.preferences;
+  return {
+    ...state.preferences,
+    map: {
+      ...state.preferences.map,
+      ...(clearMapbox ? { mapboxStyleUrl: undefined } : {}),
+      ellipsoidId,
+    },
+  };
+}
+
 export interface AppState {
   projectName: string;
   projectPath: string | null;
@@ -1397,35 +1412,22 @@ export const useAppStore = create<AppState>()(
             isDirty: true,
           };
         }),
-      setBasemapStyleUrl: (url) => set({ basemapStyleUrl: url, isDirty: true }),
+      setBasemapStyleUrl: (url) =>
+        set((state) => ({
+          basemapStyleUrl: url,
+          preferences: preferencesForBasemap(state),
+          isDirty: true,
+        })),
       applyPlanetaryBasemap: (basemap) =>
         set((state) => ({
           basemapStyleUrl: basemap.styleUrl,
-          preferences:
-            state.preferences.map.ellipsoidId === basemap.ellipsoidId
-              ? state.preferences
-              : {
-                  ...state.preferences,
-                  map: {
-                    ...state.preferences.map,
-                    ellipsoidId: basemap.ellipsoidId,
-                  },
-                },
+          preferences: preferencesForBasemap(state, basemap.ellipsoidId),
           isDirty: true,
         })),
       restoreEarthBasemap: (styleUrl) =>
         set((state) => ({
           basemapStyleUrl: styleUrl,
-          preferences:
-            state.preferences.map.ellipsoidId === DEFAULT_ELLIPSOID_ID
-              ? state.preferences
-              : {
-                  ...state.preferences,
-                  map: {
-                    ...state.preferences.map,
-                    ellipsoidId: DEFAULT_ELLIPSOID_ID,
-                  },
-                },
+          preferences: preferencesForBasemap(state, DEFAULT_ELLIPSOID_ID),
           isDirty: true,
         })),
       setBasemapVisible: (visible) => set({ basemapVisible: visible, isDirty: true }),

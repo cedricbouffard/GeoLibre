@@ -36,6 +36,7 @@ const SOURCE_DRAW_ORDER = [
   "raster",
   "stac-search",
   "google-3d-tiles",
+  "mapbox-3d-tiles",
   "deckviz",
   "route-anim",
 ] as const;
@@ -113,7 +114,7 @@ async function runEnsureSharedDeckOverlay(app: GeoLibreAppAPI): Promise<MapboxOv
   if (!app.getDeckGL) return null;
   deckGL ??= await app.getDeckGL();
 
-  const map = app.getMap?.() ?? null;
+  const map = app.getMap?.() ?? app.getMapboxMap?.() ?? null;
   if (overlay && boundMap === map) {
     // Already bound to this map; just refresh the rendered layers.
     renderSharedDeckOverlay();
@@ -240,7 +241,7 @@ function renderSharedDeckOverlay(): void {
     // The successful mount can happen on a later retry, after the map became
     // ready; record the map it actually bound to so a subsequent ensure() does
     // not see a stale value and needlessly rebind.
-    boundMap = appRef.getMap?.() ?? boundMap;
+    boundMap = appRef.getMap?.() ?? appRef.getMapboxMap?.() ?? boundMap;
   }
 
   overlay.setProps({ layers });

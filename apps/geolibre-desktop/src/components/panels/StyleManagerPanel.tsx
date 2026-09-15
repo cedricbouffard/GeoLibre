@@ -62,7 +62,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { clamp } from "../../lib/clamp";
-import { isQmlStyleXml } from "../../lib/style-format";
+import { isQmlStyleXml } from "@geolibre/map/style-import";
 import { openLocalDataFileWithFallback, saveTextFileWithFallback } from "../../lib/tauri-io";
 import {
   createCategorizedStops,

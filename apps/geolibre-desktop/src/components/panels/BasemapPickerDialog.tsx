@@ -108,7 +108,11 @@ interface BasemapPickerDialogProps {
  */
 export function BasemapPickerDialog({ open, onOpenChange }: BasemapPickerDialogProps) {
   const { t } = useTranslation();
-  const basemapStyleUrl = useAppStore((s) => s.basemapStyleUrl);
+  const basemapStyleUrl = useAppStore((s) =>
+    s.primaryRenderer === "mapbox"
+      ? (s.preferences.map.mapboxStyleUrl ?? s.basemapStyleUrl)
+      : s.basemapStyleUrl,
+  );
   const setBasemapStyleUrl = useAppStore((s) => s.setBasemapStyleUrl);
   const setMapView = useAppStore((s) => s.setMapView);
   const applyPlanetaryBasemap = useAppStore((s) => s.applyPlanetaryBasemap);

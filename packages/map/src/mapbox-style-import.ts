@@ -134,6 +134,17 @@ function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+/**
+ * Whether the style's author leaves this layer drawn.
+ *
+ * The spec makes `visibility` a plain enum, `"visible"` or `"none"`, so only the literal `"none"`
+ * hides a layer. Anything else a non-conformant style puts there counts as drawn, which leaves the
+ * layer importable rather than silently dropped.
+ */
+function isDrawn(layer: RawStyleLayer): boolean {
+  return asString((layer.layout ?? {}).visibility) !== "none";
+}
+
 /** Match `["get", "prop"]`, returning the property name. */
 function getProperty(node: unknown): string | null {
   const array = asArray(node);
@@ -427,9 +438,9 @@ function parseStackedLayerColors(
     return {
       id: asString(layer.id),
       filter: asArray(layer.filter),
+      drawn: isDrawn(layer),
       // No colour named (absent or `null`) means the spec default, unless something else paints the
-      // feature. A colour named as anything but a flat string still disqualifies the stack. Nothing
-      // here reads `layout.visibility` — hidden classes are a separate, pre-existing bug.
+      // feature. A colour named as anything but a flat string still disqualifies the stack.
       color:
         rawColor == null
           ? (COLOR_OVERRIDING_PAINT[paintProperty] ?? []).some((key) => paint[key] != null)
@@ -447,6 +458,14 @@ function parseStackedLayerColors(
   ) {
     return null;
   }
+  // Every class switched off describes no rules worth building: they would all be disabled, which
+  // imports the layer blank while reporting success. It still describes a colour, so hand back the
+  // bottom-most one as a flat renderer rather than nothing. Returning `null` here would drop the
+  // spec default this loop already resolved, and a layer carrying a categorized or rule-based
+  // renderer would keep it through an import that plainly replaces it.
+  if (!entries.some((entry) => entry.drawn)) {
+    return { mode: "single", color: entries[0].color! };
+  }
 
   const rules: NonNullable<LayerStyle["vectorRules"]> = entries.reverse().map((entry, index) => ({
     id: `import-layer-${index}`,
@@ -454,6 +473,8 @@ function parseStackedLayerColors(
     filter: JSON.stringify(entry.filter),
     color: entry.color!,
     isElse: false,
+    // The rule schema's own checkbox, which is what the style's author already set.
+    ...(entry.drawn ? {} : { enabled: false }),
     ...(entry.minZoom === null ? {} : { minZoom: entry.minZoom }),
     ...(entry.maxZoom === null ? {} : { maxZoom: entry.maxZoom }),
   }));
@@ -663,7 +684,12 @@ function applyStackedZoomRange(
   layers: RawStyleLayer[],
   patch: Partial<Omit<LayerStyle, "labels">>,
 ): void {
-  const ranges = layers.map((layer) => {
+  // Fold only the classes that draw. A hidden class spanning z0-22 beside a visible z4-12 one would
+  // otherwise widen the layer to a range nothing is painted over. Every caller is already guarded by
+  // the stack having applied, and a stack with no drawn class does not apply, so the fall back to
+  // `layers` is unreachable today. It stays because `Math.min()` of nothing is `Infinity`.
+  const drawn = layers.filter(isDrawn);
+  const ranges = (drawn.length > 0 ? drawn : layers).map((layer) => {
     const rawMin = clampZoom(layer.minzoom);
     const rawMax = clampZoom(layer.maxzoom);
     if (rawMin !== null && rawMax !== null) {
@@ -785,7 +811,7 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
   const root = input as { layers?: unknown } | null;
   const rawLayers = asArray(root?.layers);
   if (!rawLayers) {
-    warnings.push("This file is not a Mapbox GL style (no `layers` array); nothing was imported.");
+    warnings.push("That is not a Mapbox GL style (no `layers` array); nothing was imported.");
     return { style: patch, labels, warnings, matchedLayerCount: 0 };
   }
 
@@ -793,6 +819,12 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     (layer): layer is RawStyleLayer => typeof layer === "object" && layer !== null,
   );
   const byType = (type: string) => layers.filter((layer) => layer.type === type);
+  // The single-layer fallback used to take document order, so a hidden layer beat a drawn one
+  // sitting right below it. Prefer a drawn layer, and keep document order among equals.
+  const firstOfType = (type: string): RawStyleLayer | undefined => {
+    const ofType = byType(type);
+    return ofType.find(isDrawn) ?? ofType[0];
+  };
 
   // A color renderer (categorized/graduated/rule-based/expression) is shared by
   // every geometry in an exported style, so read it once from the highest-
@@ -803,15 +835,51 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
   const stackedFill = parseStackedLayerColors(byType("fill"), "fill-color");
   const stackedLine = parseStackedLayerColors(byType("line"), "line-color");
   const stackedCircle = parseStackedLayerColors(byType("circle"), "circle-color");
+  // A stack whose classes are all hidden comes back as a flat colour rather than rules. It is still
+  // one layer's worth of symbology, so it must not be counted or reported as a combined stack.
+  const builtRules = (parsed: ParsedColor | null): boolean => Boolean(parsed?.rules);
   const appliedStackTypes = new Set<string>();
 
-  const [fill] = byType("fill");
-  const [extrusion] = byType("fill-extrusion");
-  const [line] = byType("line");
-  const [circle] = byType("circle");
-  const [heatmap] = byType("heatmap");
-  const [symbol] = byType("symbol");
+  const rawExtrusion = firstOfType("fill-extrusion");
+  const rawFill = firstOfType("fill");
+  const rawLine = firstOfType("line");
+  const rawCircle = firstOfType("circle");
+  const rawHeatmap = firstOfType("heatmap");
 
+  // One layer's symbology reaches several GeoLibre settings, and the render types compete for all of
+  // them: the colour renderer is claimed once, stroke comes from whichever of line, fill outline or
+  // circle stroke speaks last, and so on down to opacity and width. Rather than guard each of those
+  // in turn, a hidden layer stops being a candidate at all while any drawn layer can speak. When
+  // every candidate is hidden nothing stands aside, so a hidden-only style imports as it does today.
+  //
+  // This is deliberately one decision for the whole style rather than one per contest. A hidden
+  // heatmap beside a drawn fill is dropped even though no other layer claims the point renderer,
+  // because the question being answered is "did the author leave this layer on", not "is another
+  // layer fighting for this exact field". Per-contest gating would import a layer the author
+  // switched off whenever nothing else happened to want the same setting, which is the behaviour
+  // this is here to remove. Nothing is lost quietly: every type dropped this way is reported below.
+  const rawSymbol = firstOfType("symbol");
+  const someoneIsDrawn = [rawExtrusion, rawFill, rawLine, rawCircle, rawHeatmap, rawSymbol].some(
+    (candidate) => candidate !== undefined && isDrawn(candidate),
+  );
+  const speaking = (candidate: RawStyleLayer | undefined): RawStyleLayer | undefined =>
+    candidate !== undefined && !isDrawn(candidate) && someoneIsDrawn ? undefined : candidate;
+
+  const extrusion = speaking(rawExtrusion);
+  const fill = speaking(rawFill);
+  const line = speaking(rawLine);
+  const circle = speaking(rawCircle);
+  const heatmap = speaking(rawHeatmap);
+  // A symbol layer goes through the same gate as the rest. The exporter stamps the layer's own
+  // `visible` flag onto every layer it emits, so re-importing an export taken from a hidden layer
+  // must not switch the labels off. That case is a style with nothing drawn anywhere, where nothing
+  // stands aside and the symbol still speaks. A style whose symbol alone is switched off, beside
+  // drawn paint, is an author turning labels off, and it is read that way.
+  const symbol = speaking(rawSymbol);
+
+  // A drawn fill beats a hidden extrusion, which would otherwise extrude the layer and drop the
+  // fill's own colour on the floor. `speaking` has already settled that: a hidden extrusion is not a
+  // candidate here while the fill draws.
   if (extrusion) {
     matchedLayerCount += 1;
     patch.extrusionEnabled = true;
@@ -826,6 +894,12 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
       colorClaimed = true;
     } else if (color.color) {
       patch.extrusionColor = color.color;
+      // Same reason the line branch says so for its flat colour: without a mode the layer keeps
+      // whatever categorized or rule-based renderer it already had, and a style describing one
+      // extrusion colour imports as a no-op over it. The renderer is not claimed, though: a flat
+      // extrusion colour writes only `extrusionColor`, so a circle drawn beside it still has to
+      // supply `fillColor`, as it did before the mode was set here.
+      patch.vectorStyleMode = "single";
     }
     const opacity = asFiniteNumber(paint["fill-extrusion-opacity"]);
     if (opacity !== null) patch.extrusionOpacity = opacity;
@@ -836,8 +910,8 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     if (base !== null) patch.extrusionBase = base;
     applyZoomRange(extrusion, patch);
   } else if (fill) {
-    matchedLayerCount += stackedFill ? byType("fill").length : 1;
-    if (stackedFill) appliedStackTypes.add("fill");
+    matchedLayerCount += builtRules(stackedFill) ? byType("fill").length : 1;
+    if (builtRules(stackedFill)) appliedStackTypes.add("fill");
     patch.extrusionEnabled = false;
     const paint = fill.paint ?? {};
     const fillColor = stackedFill ?? parseColorValue(paint["fill-color"], warnings);
@@ -855,7 +929,7 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     }
     const outline = parseStrokeColor(paint["fill-outline-color"]);
     if (outline) patch.strokeColor = outline;
-    if (stackedFill) applyStackedZoomRange(byType("fill"), patch);
+    if (builtRules(stackedFill)) applyStackedZoomRange(byType("fill"), patch);
     else applyZoomRange(fill, patch);
   }
 
@@ -872,7 +946,7 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     if (!colorClaimed && !circle) {
       const color = stackedLine ?? parseColorValue(paint["line-color"], warnings);
       if (color.mode && color.mode !== "single") {
-        if (stackedLine) {
+        if (builtRules(stackedLine)) {
           appliedStackTypes.add("line");
           matchedLayerCount += byType("line").length - 1;
         }
@@ -880,6 +954,13 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
         // color: line-color's baked fallback is strokeColor (already recovered
         // above), whereas applyColorRenderer would route it into fillColor.
         applyColorRenderer({ ...color, color: undefined }, patch);
+        colorClaimed = true;
+      } else if (color.mode === "single") {
+        // A flat line colour still owns the renderer, and saying so is the whole point: without it
+        // the layer keeps whatever categorized or rule-based renderer it already had, and the
+        // import reads as a no-op over a style that plainly describes one colour. The fallback
+        // colour itself still stays out of `fillColor`, for the reason above.
+        patch.vectorStyleMode = "single";
         colorClaimed = true;
       }
     }
@@ -896,7 +977,7 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     const paint = circle.paint ?? {};
     if (!colorClaimed) {
       applyColorRenderer(stackedCircle ?? parseColorValue(paint["circle-color"], warnings), patch);
-      if (stackedCircle) {
+      if (builtRules(stackedCircle)) {
         appliedStackTypes.add("circle");
         matchedLayerCount += byType("circle").length - 1;
       }
@@ -938,10 +1019,11 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
     else applyZoomRange(circle, patch);
   }
 
+  // GeoLibre has one point renderer, so circle and heatmap contest it. A drawn circle beats a
+  // hidden heatmap, which `speaking` has already removed from the running.
   if (heatmap) {
     matchedLayerCount += 1;
-    // GeoLibre has a single point renderer, so a style with both a circle and a
-    // heatmap layer (e.g. split by zoom) collapses to the heatmap; flag the loss.
+    // A style with both (e.g. split by zoom) collapses to the heatmap; flag the loss.
     if (circle) {
       warnings.push("The style has both circle and heatmap point layers; imported as a heatmap.");
     }
@@ -973,14 +1055,46 @@ export function parseMapboxStyle(input: unknown): MapboxStyleImportResult {
 
   // Filtered flat-color stacks can be represented exactly as rules only when
   // that geometry actually claims the shared renderer. Flag every other stack.
-  for (const type of ["fill", "fill-extrusion", "line", "circle", "symbol"]) {
-    if (byType(type).length < 2) continue;
-    if (appliedStackTypes.has(type)) {
+  const speakingByType: Record<string, RawStyleLayer | undefined> = {
+    fill,
+    "fill-extrusion": extrusion,
+    line,
+    circle,
+    heatmap,
+    // The entry still has to be here even though `symbol` already went through the same `speaking`
+    // gate as the rest above: the loop below reads a missing key as "this type stands aside" and
+    // would report every symbol layer as hidden.
+    symbol,
+  };
+  for (const type of ["fill", "fill-extrusion", "line", "circle", "heatmap", "symbol"]) {
+    const count = byType(type).length;
+    if (count === 0) continue;
+    // Every layer of this type stands aside, so none of them was imported. This is reported for a
+    // lone layer too: one hidden extrusion beside a drawn fill is dropped just as silently as five
+    // are, and the reader has no other way to learn the style's extrusion went unread.
+    const representative = speakingByType[type];
+    if (representative === undefined) {
       warnings.push(
-        `The style's multiple ${type} layers were combined as rules; paint properties other than color come from the bottom-most layer.`,
+        count > 1
+          ? `The style's ${type} layers are all hidden; none was imported.`
+          : `The style's ${type} layer is hidden; it was not imported.`,
+      );
+      continue;
+    }
+    if (count < 2) continue;
+    if (appliedStackTypes.has(type)) {
+      // A stack only applies when at least one class is drawn, so the representative is drawn.
+      warnings.push(
+        `The style's multiple ${type} layers were combined as rules; paint properties other than color come from the bottom-most drawn layer.`,
       );
     } else {
-      warnings.push(`The style has multiple ${type} layers; only the first was imported.`);
+      // With nothing drawn anywhere in the style, a hidden layer still speaks (nothing stands
+      // aside), so the representative is not necessarily drawn.
+      warnings.push(
+        isDrawn(representative)
+          ? `The style has multiple ${type} layers; only the bottom-most drawn layer was imported.`
+          : `The style has multiple ${type} layers, all hidden; only the bottom-most one was imported.`,
+      );
     }
   }
 

@@ -47,6 +47,8 @@ const IDLE_TIMEOUT_MS = 8000;
 
 /** The layer kinds the drape draws. */
 const DRAPED_TYPES = new Set(["vector-tiles", "pmtiles", "mbtiles"]);
+/** `metadata.sourceKind` for the layers maplibre-gl-vector owns (as in layer-sync.ts). */
+const VECTOR_CONTROL_SOURCE_KIND = "maplibre-gl-vector";
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
@@ -66,6 +68,14 @@ export function isDrapedLayer(layer: GeoLibreLayer): boolean {
   if (layer.type === "arcgis") return arcgisVectorStyle(layer) !== null;
   if (!DRAPED_TYPES.has(layer.type)) return false;
   if (layer.type === "vector-tiles") {
+    // maplibre-gl-vector's tiled records are control-owned: the 2D sync the
+    // drape reuses never creates their DuckDB source, so they render from a
+    // collection (see the plugin's vector-cesium-bridge) or not at all.
+    if (
+      layer.metadata?.sourceKind === VECTOR_CONTROL_SOURCE_KIND &&
+      layer.metadata.externalNativeLayer === true
+    )
+      return false;
     return (
       Boolean(str(layer.source?.url)) ||
       (Array.isArray(layer.source?.tiles) && layer.source.tiles.length > 0)

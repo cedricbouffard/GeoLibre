@@ -17,6 +17,13 @@ function credentialProject() {
   project.preferences.geocoding.forwardEndpoint =
     "https://geocode.example.com/search?key=endpoint-secret";
   project.basemapStyleUrl = "https://styles.example.com/map.json?access_token=basemap-secret";
+  project.preferences = {
+    ...project.preferences,
+    map: {
+      ...project.preferences.map,
+      mapboxStyleUrl: "https://api.mapbox.com/styles/v1/acme/day?access_token=mapbox-style-secret",
+    },
+  };
   project.layers = [
     {
       id: "auth",
@@ -55,6 +62,7 @@ describe("project credential redaction", () => {
       "geocoder-secret",
       "endpoint-secret",
       "basemap-secret",
+      "mapbox-style-secret",
       "password",
       "url-secret",
       "encoded-secret",
@@ -70,7 +78,12 @@ describe("project credential redaction", () => {
     assert.deepEqual(project.plugins?.settings, {});
     assert.ok(redactedPaths.includes("plugins.settings"));
     assert.equal(redactedPaths.includes("basemapStyleUrl"), true);
-    assert.equal(redactProjectCredentials(original).redactedCount, 9);
+    assert.equal(redactedPaths.includes("preferences.map.mapboxStyleUrl"), true);
+    assert.equal(
+      project.preferences.map.mapboxStyleUrl,
+      "https://api.mapbox.com/styles/v1/acme/day",
+    );
+    assert.equal(redactProjectCredentials(original).redactedCount, 10);
     assert.equal(original.plugins?.settings.external.arbitraryName, "plugin-secret");
   });
 

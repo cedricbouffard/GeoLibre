@@ -75,6 +75,17 @@ function vectorTiles(patch: Partial<GeoLibreLayer> = {}): GeoLibreLayer {
 }
 
 describe("isDrapedLayer", () => {
+  it("never drapes a maplibre-gl-vector tiled record: the 2D sync skips its DuckDB source", () => {
+    const layer = vectorTiles({
+      metadata: { sourceKind: "maplibre-gl-vector", externalNativeLayer: true },
+      source: { type: "vector", url: "https://example.com/roads.parquet" },
+    });
+    assert.equal(isDrapedLayer(layer), false);
+    assert.equal(isCesiumSupportedLayerType(layer), false);
+    assert.equal(isDrapedLayer({ ...layer, metadata: { externalNativeLayer: true } }), true);
+    assert.equal(isDrapedLayer({ ...layer, metadata: { sourceKind: "maplibre-gl-vector" } }), true);
+  });
+
   it("only promises ArcGIS rendering when the resolved vector style is present", () => {
     const layer = vectorTiles({
       type: "arcgis",

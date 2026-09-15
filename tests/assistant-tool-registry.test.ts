@@ -5,9 +5,12 @@ import { z } from "zod";
 import {
   registerAssistantTool,
   registerAssistantToolSpec,
+  registerAssistantGuidance,
   listAssistantTools,
+  listAssistantGuidance,
   unregisterAssistantToolsByOwner,
   getAssistantToolsVersion,
+  MAX_ASSISTANT_GUIDANCE_LENGTH,
 } from "../packages/plugins/src/assistant-tool-registry";
 import { PluginManager } from "../packages/plugins/src/plugin-manager";
 import type { GeoLibreAppAPI, GeoLibrePlugin } from "../packages/plugins/src/types";
@@ -93,7 +96,11 @@ test("scoped names cannot collide across ambiguous owner/name joins", () => {
   assert.throws(() => registerAssistantToolSpec({ ...spec(), name: "ECHO" }, "test"), /conflicts/);
 });
 
-const app = { registerAssistantTool, registerAssistantToolSpec } as GeoLibreAppAPI;
+const app = {
+  registerAssistantTool,
+  registerAssistantToolSpec,
+  registerAssistantGuidance,
+} as GeoLibreAppAPI;
 function plugin(activate: GeoLibrePlugin["activate"], deactivate = () => {}): GeoLibrePlugin {
   return { id: "test", name: "Test", version: "1.0.0", activate, deactivate };
 }
@@ -177,4 +184,96 @@ test("late async registration cannot survive deactivation or replace a new activ
   assert.equal(listAssistantTools().length, 1);
   manager.unregister("test", app);
   assert.equal(listAssistantTools().length, 0);
+});
+
+test("guidance is versioned, trimmed, replaced in place and disposable", () => {
+  const before = getAssistantToolsVersion();
+  const dispose = registerAssistantGuidance("  Call get_ranking directly.  ", "test");
+  assert.ok(getAssistantToolsVersion() > before);
+  assert.deepEqual(listAssistantGuidance(), [
+    { text: "Call get_ranking directly.", ownerPluginId: "test" },
+  ]);
+  // Identical text from the same owner replaces rather than duplicates, and the
+  // older disposer can no longer remove the replacement.
+  const replacement = registerAssistantGuidance("Call get_ranking directly.", "test");
+  registerAssistantGuidance("Call get_ranking directly.", "other");
+  registerAssistantGuidance("Never wrap plugin tools in SQL.", "test");
+  dispose();
+  assert.equal(listAssistantGuidance().length, 3);
+  replacement();
+  assert.deepEqual(
+    listAssistantGuidance().map((entry) => entry.text),
+    ["Call get_ranking directly.", "Never wrap plugin tools in SQL."],
+  );
+  const versionBefore = getAssistantToolsVersion();
+  replacement();
+  assert.equal(getAssistantToolsVersion(), versionBefore);
+  unregisterAssistantToolsByOwner("test");
+  assert.deepEqual(listAssistantGuidance(), [
+    { text: "Call get_ranking directly.", ownerPluginId: "other" },
+  ]);
+  unregisterAssistantToolsByOwner("other");
+  assert.deepEqual(listAssistantGuidance(), []);
+});
+
+test("guidance rejects empty, oversized and badly owned text", () => {
+  assert.throws(() => registerAssistantGuidance("   ", "test"), /non-empty/);
+  assert.throws(() => registerAssistantGuidance(undefined as unknown as string, "test"));
+  assert.throws(
+    () => registerAssistantGuidance("x".repeat(MAX_ASSISTANT_GUIDANCE_LENGTH + 1), "test"),
+    /at most/,
+  );
+  assert.throws(() => registerAssistantGuidance("ok", "bad owner"), /plugin IDs/);
+  registerAssistantGuidance("x".repeat(MAX_ASSISTANT_GUIDANCE_LENGTH), "test");
+  assert.equal(listAssistantGuidance().length, 1);
+});
+
+test("manager scopes guidance to the activating plugin and removes it on teardown", () => {
+  const manager = new PluginManager();
+  const seen: Array<GeoLibreAppAPI["registerAssistantGuidance"]> = [];
+  let stale: GeoLibreAppAPI;
+  manager.register({
+    id: "test",
+    name: "Test",
+    version: "1.0.0",
+    activate: (api) => {
+      stale = api;
+      api.registerAssistantGuidance!("Prefer plugin_4_test_echo for rankings.", "other");
+    },
+    deactivate: () => {},
+    applyProjectState: (api) => {
+      seen.push(api.registerAssistantGuidance);
+      api.registerAssistantGuidance?.("leaked");
+    },
+  });
+  manager.activate("test", app);
+  assert.deepEqual(listAssistantGuidance(), [
+    { text: "Prefer plugin_4_test_echo for rankings.", ownerPluginId: "test" },
+  ]);
+  manager.applyPluginState("test", app, { any: "state" });
+  assert.deepEqual(seen, [undefined]);
+  manager.deactivate("test", app);
+  assert.deepEqual(listAssistantGuidance(), []);
+  // Owner "other" was ignored: the host injected "test", so its cleanup applied.
+  stale!.registerAssistantGuidance!("late");
+  assert.deepEqual(listAssistantGuidance(), []);
+});
+
+test("failed activation removes guidance along with tools", async () => {
+  for (const outcome of ["false", "throw", "async-false", "async-throw"]) {
+    const manager = new PluginManager();
+    manager.register(
+      plugin((api) => {
+        api.registerAssistantGuidance!("guidance");
+        api.registerAssistantToolSpec!(spec());
+        if (outcome === "throw") throw new Error("failed");
+        if (outcome === "async-throw") return Promise.reject(new Error("failed"));
+        return outcome === "async-false" ? Promise.resolve(false) : false;
+      }),
+    );
+    if (outcome === "throw") assert.throws(() => manager.activate("test", app));
+    else assert.equal(await manager.activate("test", app), false);
+    assert.deepEqual(listAssistantGuidance(), [], outcome);
+    assert.equal(listAssistantTools().length, 0, outcome);
+  }
 });
