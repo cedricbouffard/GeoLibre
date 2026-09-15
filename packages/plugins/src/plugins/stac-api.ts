@@ -404,7 +404,9 @@ function collectionBbox(
 }
 
 function isStacCollection(value: unknown): value is StacCollection {
-  return Boolean(value) && typeof value === "object" && typeof (value as StacCollection).id === "string";
+  return (
+    Boolean(value) && typeof value === "object" && typeof (value as StacCollection).id === "string"
+  );
 }
 
 async function loadStacCollections(
