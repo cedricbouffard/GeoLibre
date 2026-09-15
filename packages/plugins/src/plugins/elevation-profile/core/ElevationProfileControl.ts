@@ -18,6 +18,7 @@ import {
   formatElevation,
   unitSystemLabel,
   UNIT_SYSTEMS,
+  type ElevationPrecision,
   type UnitSystem,
 } from "../elevation/format";
 import type { DeepLinkConsumer } from "../utils/deep-link";
@@ -62,6 +63,7 @@ const DEFAULT_OPTIONS: Required<
   title: "Elevation Profile",
   panelWidth: 320,
   unitSystem: "metric",
+  precision: "unit",
   className: "",
   maxSamples: MAX_POINTS_PER_REQUEST,
 };
@@ -120,6 +122,7 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
   private _selectedButton?: HTMLButtonElement;
   private _clearButton?: HTMLButtonElement;
   private _unitButton?: HTMLButtonElement;
+  private _precisionSelect?: HTMLSelectElement;
   private _readoutEl?: HTMLElement;
   private _exportEl?: HTMLElement;
   private _svgEl?: SVGSVGElement;
@@ -167,6 +170,7 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     this._state = {
       collapsed: this._options.collapsed,
       unitSystem: this._options.unitSystem,
+      precision: this._options.precision,
       line: null,
       elevations: null,
     };
@@ -257,6 +261,7 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     return {
       collapsed: this._state.collapsed,
       unitSystem: this._state.unitSystem,
+      precision: this._state.precision,
       line: this._state.line ? this._state.line.map((c) => [...c] as LngLat) : null,
       elevations: this._state.elevations ? [...this._state.elevations] : null,
     };
@@ -275,6 +280,7 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     this._state = { ...this._state, ...newState };
 
     if (newState.unitSystem) this._syncUnitButton();
+    if (newState.precision) this._syncPrecisionSelect();
     if (this._panel) {
       this._panel.classList.toggle("expanded", !this._state.collapsed);
     }
@@ -765,7 +771,27 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     unit.addEventListener("click", () => this._cycleUnits());
     this._unitButton = unit;
 
-    actions.append(draw, selected, clear, unit);
+    const precision = document.createElement("select");
+    precision.className = "elevation-profile-button elevation-profile-precision";
+    precision.setAttribute("aria-label", "Elevation precision");
+    for (const [value, label] of [
+      ["unit", "0 decimals"],
+      ["decimal1", "1 decimal"],
+      ["decimal2", "2 decimals"],
+      ["auto", "Auto (2 max)"],
+    ] as const) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      precision.appendChild(option);
+    }
+    precision.addEventListener("change", () => {
+      this._state.precision = precision.value as ElevationPrecision;
+      this._renderProfile();
+    });
+    this._precisionSelect = precision;
+
+    actions.append(draw, selected, clear, unit, precision);
 
     // Status
     const status = document.createElement("div");
@@ -817,9 +843,14 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     }
 
     this._syncUnitButton();
+    this._syncPrecisionSelect();
     this._syncButtons();
     this._renderProfile();
     return panel;
+  }
+
+  private _syncPrecisionSelect(): void {
+    if (this._precisionSelect) this._precisionSelect.value = this._state.precision;
   }
 
   // --- Rendering: stats, chart, readout ---------------------------------
@@ -864,10 +895,10 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
     const system = this._state.unitSystem;
     const items: Array<[string, string]> = [
       ["Distance", formatDistance(this._stats.totalDistance, system)],
-      ["Min", formatElevation(this._stats.min, system)],
-      ["Max", formatElevation(this._stats.max, system)],
-      ["Ascent ↑", formatElevation(this._stats.gain, system)],
-      ["Descent ↓", formatElevation(this._stats.loss, system)],
+      ["Min", formatElevation(this._stats.min, system, this._state.precision)],
+      ["Max", formatElevation(this._stats.max, system, this._state.precision)],
+      ["Ascent ↑", formatElevation(this._stats.gain, system, this._state.precision)],
+      ["Descent ↓", formatElevation(this._stats.loss, system, this._state.precision)],
     ];
     for (const [label, value] of items) {
       const cell = document.createElement("div");
@@ -932,13 +963,13 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
 
     // Min / max elevation axis labels.
     const maxLabel = this._axisLabel(
-      formatElevation(geometry.maxElevation, system),
+      formatElevation(geometry.maxElevation, system, this._state.precision),
       geometry.padding.left - 4,
       geometry.yScale(geometry.maxElevation) + 3,
       "end",
     );
     const minLabel = this._axisLabel(
-      formatElevation(geometry.minElevation, system),
+      formatElevation(geometry.minElevation, system, this._state.precision),
       geometry.padding.left - 4,
       geometry.yScale(geometry.minElevation),
       "end",
@@ -972,7 +1003,7 @@ export class ElevationProfileControl implements IControl, DeepLinkConsumer {
       hoverDot.setAttribute("cy", `${y}`);
       this._setHoverPoint(this._sampledCoords[index] ?? null);
       if (this._readoutEl) {
-        this._readoutEl.textContent = `${formatDistance(point.distance, system)} · ${formatElevation(point.elevation, system)}`;
+        this._readoutEl.textContent = `${formatDistance(point.distance, system)} · ${formatElevation(point.elevation, system, this._state.precision)}`;
       }
     };
 

@@ -1,7 +1,7 @@
 import type { Feature, Geometry } from "geojson";
 
 import type { LngLat } from "../elevation/geometry";
-import type { UnitSystem } from "../elevation/format";
+import type { ElevationPrecision, UnitSystem } from "../elevation/format";
 import type { NativeProfileMap } from "./native";
 
 /** Corner of the map the control can dock to. */
@@ -47,6 +47,7 @@ export interface ElevationProfileControlOptions {
   panelWidth?: number;
   /** Initial unit system. @default 'metric' */
   unitSystem?: UnitSystem;
+  precision?: ElevationPrecision;
   /** Extra CSS class for the control container. */
   className?: string;
   /**
@@ -72,6 +73,7 @@ export interface ElevationProfileState {
   collapsed: boolean;
   /** Active unit system. */
   unitSystem: UnitSystem;
+  precision: ElevationPrecision;
   /** The profiled line as `[lng, lat]` vertices, or `null` when none is drawn. */
   line: LngLat[] | null;
   /** Embedded elevations aligned with {@link line}, or null for sampled terrain. */

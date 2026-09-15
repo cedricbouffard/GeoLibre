@@ -7,6 +7,7 @@
 
 /** Selectable measurement system for the profile readouts. */
 export type UnitSystem = "metric" | "imperial";
+export type ElevationPrecision = "unit" | "decimal1" | "decimal2" | "auto";
 
 const FEET_PER_METER = 3.28084;
 const MILES_PER_METER = 0.000621371;
@@ -27,11 +28,18 @@ export function unitSystemLabel(system: UnitSystem): string {
  * @param system - The active unit system
  * @returns A rounded elevation with its unit, e.g. `"742 m"` or `"2434 ft"`
  */
-export function formatElevation(meters: number, system: UnitSystem): string {
+export function formatElevation(
+  meters: number,
+  system: UnitSystem,
+  precision: ElevationPrecision = "unit",
+): string {
+  const digits = precision === "unit" ? 0 : precision === "decimal1" ? 1 : 2;
+  const format = (value: number): string =>
+    precision === "auto" ? Number(value.toFixed(2)).toString() : value.toFixed(digits);
   if (system === "imperial") {
-    return `${Math.round(meters * FEET_PER_METER)} ft`;
+    return `${format(meters * FEET_PER_METER)} ft`;
   }
-  return `${Math.round(meters)} m`;
+  return `${format(meters)} m`;
 }
 
 /**

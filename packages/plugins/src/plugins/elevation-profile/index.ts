@@ -40,6 +40,7 @@ function createControl(app: GeoLibreAppAPI): ElevationProfileControl {
     // plugin and closed it again.
     collapsed: true,
     unitSystem: pendingState?.unitSystem ?? "metric",
+    precision: pendingState?.precision ?? "unit",
     // Bind the host's file save so CSV/SVG export uses Tauri's native dialog on
     // the desktop (and a browser download on the web); the control falls back
     // to a download when the host does not provide it.
@@ -78,6 +79,15 @@ function isPluginState(value: unknown): value is Partial<ElevationProfileState> 
     "unitSystem" in candidate &&
     candidate.unitSystem !== "metric" &&
     candidate.unitSystem !== "imperial"
+  ) {
+    return false;
+  }
+  if (
+    "precision" in candidate &&
+    candidate.precision !== "unit" &&
+    candidate.precision !== "decimal1" &&
+    candidate.precision !== "decimal2" &&
+    candidate.precision !== "auto"
   ) {
     return false;
   }
@@ -191,6 +201,7 @@ export const maplibreElevationProfilePlugin: GeoLibrePlugin = {
       const cleared: ElevationProfileState = {
         collapsed: false,
         unitSystem: "metric",
+        precision: "unit",
         line: null,
         elevations: null,
       };
