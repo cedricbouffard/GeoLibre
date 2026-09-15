@@ -409,6 +409,12 @@ function isStacCollection(value: unknown): value is StacCollection {
   );
 }
 
+/** One page of a `/collections` response: the collections it carries and the links off it. */
+interface StacCollectionsPage {
+  collections?: unknown;
+  links?: unknown;
+}
+
 async function loadStacCollections(
   href: string,
   fetcher: FetchLike,
@@ -420,7 +426,10 @@ async function loadStacCollections(
 
   while (pageUrl && !visited.has(pageUrl)) {
     visited.add(pageUrl);
-    const data = await fetchJson<{ collections?: unknown; links?: unknown }>(
+    // The annotation is load-bearing: narrowing `pageUrl` here means following it through the
+    // assignment at the bottom of the loop, which reads `data` — a cycle TypeScript reports as
+    // TS7022 unless `data` states its own type.
+    const data: StacCollectionsPage = await fetchJson<StacCollectionsPage>(
       pageUrl,
       { signal },
       fetcher,
