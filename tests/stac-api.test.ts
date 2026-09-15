@@ -146,6 +146,43 @@ test("connectStac discovers relative API links and collections", async () => {
   assert.deepEqual(calls, ["https://example.com/stac/", "https://example.com/stac/collections"]);
 });
 
+test("connectStac follows paginated collection links", async () => {
+  const calls: string[] = [];
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/collections")) {
+      return jsonResponse({
+        collections: [{ id: "first", title: "First" }],
+        links: [{ rel: "next", href: "./collections?offset=1" }],
+      });
+    }
+    if (url.endsWith("/collections?offset=1")) {
+      return jsonResponse({ collections: [{ id: "hrdem-lidar", title: "HRDEM LiDAR" }] });
+    }
+    return jsonResponse({
+      id: "demo",
+      title: "Demo STAC",
+      conformsTo: ["https://api.stacspec.org/v1.0.0/item-search"],
+      links: [
+        { rel: "search", href: "./search" },
+        { rel: "data", href: "./collections" },
+      ],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.deepEqual(
+    connection.collections.map((collection) => collection.id),
+    ["first", "hrdem-lidar"],
+  );
+  assert.deepEqual(calls, [
+    "https://example.com/stac/",
+    "https://example.com/stac/collections",
+    "https://example.com/stac/collections?offset=1",
+  ]);
+});
+
 test("connectStac reads only the root of a static catalog", async () => {
   const fetched: string[] = [];
   const fetcher = (async (input: RequestInfo | URL) => {

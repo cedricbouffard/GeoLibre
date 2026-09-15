@@ -403,6 +403,35 @@ function collectionBbox(
   return horizontalBbox(Array.isArray(boxes) ? boxes[0] : undefined);
 }
 
+function isStacCollection(value: unknown): value is StacCollection {
+  return Boolean(value) && typeof value === "object" && typeof (value as StacCollection).id === "string";
+}
+
+async function loadStacCollections(
+  href: string,
+  fetcher: FetchLike,
+  signal?: AbortSignal,
+): Promise<StacCollection[]> {
+  const collections: StacCollection[] = [];
+  const visited = new Set<string>();
+  let pageUrl: string | undefined = href;
+
+  while (pageUrl && !visited.has(pageUrl)) {
+    visited.add(pageUrl);
+    const data = await fetchJson<{ collections?: unknown; links?: unknown }>(
+      pageUrl,
+      { signal },
+      fetcher,
+    );
+    if (Array.isArray(data.collections)) {
+      collections.push(...data.collections.filter(isStacCollection));
+    }
+    pageUrl = linksOf(data.links, pageUrl).find((link) => link.rel === "next")?.href;
+  }
+
+  return collections;
+}
+
 /** Presents a Collection's own assets as one item so the existing asset browser can render it. */
 function collectionAssetItem(document: Record<string, unknown>, url: string): StacItem | undefined {
   if (document.type !== "Collection" || typeof document.id !== "string") return undefined;
@@ -483,12 +512,7 @@ export async function connectStac(
   );
   if (collectionsLink) {
     try {
-      const data = await fetchJson<{ collections?: StacCollection[] }>(
-        collectionsLink.href,
-        { signal },
-        fetcher,
-      );
-      if (Array.isArray(data.collections)) collections = data.collections;
+      collections = await loadStacCollections(collectionsLink.href, fetcher, signal);
     } catch {
       // Collection discovery is helpful but not required for item search.
     }
