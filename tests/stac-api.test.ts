@@ -206,6 +206,29 @@ test("connectStac keeps the collection pages it read when a later page fails", a
   );
 });
 
+test("connectStac keeps the collection pages it read when a later page is JSON null", async () => {
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/collections")) {
+      return jsonResponse({
+        collections: [{ id: "first", title: "First" }],
+        links: [{ rel: "next", href: "./collections?offset=1" }],
+      });
+    }
+    if (url.endsWith("/collections?offset=1")) return jsonResponse(null);
+    return jsonResponse({
+      id: "demo",
+      links: [{ rel: "data", href: "./collections" }],
+    });
+  }) as typeof fetch;
+
+  const connection = await connectStac("https://example.com/stac/", fetcher);
+  assert.deepEqual(
+    connection.collections.map((collection) => collection.id),
+    ["first"],
+  );
+});
+
 test("connectStac stops following collection pages at the page cap", async () => {
   let pages = 0;
   const fetcher = (async (input: RequestInfo | URL) => {

@@ -433,14 +433,17 @@ async function loadStacCollections(
     // The annotation is load-bearing: narrowing `pageUrl` here means following it through the
     // assignment at the bottom of the loop, which reads `data` — a cycle TypeScript reports as
     // TS7022 unless `data` states its own type.
-    let data: StacCollectionsPage;
+    let data: StacCollectionsPage | null;
     try {
-      data = await fetchJson<StacCollectionsPage>(pageUrl, { signal }, fetcher);
+      data = await fetchJson<StacCollectionsPage | null>(pageUrl, { signal }, fetcher);
     } catch {
       // A page failing does not un-fetch the pages before it. The caller treats discovery as
       // optional, so the pages that did arrive are worth more than the whole crawl thrown away.
       break;
     }
+    // `response.json()` hands back a JSON `null` body as `null`, which no field read survives —
+    // and a page that is not an object carries neither collections nor a link onward.
+    if (typeof data !== "object" || data === null) break;
     if (Array.isArray(data.collections)) {
       collections.push(...data.collections.filter(isStacCollection));
     }
