@@ -535,7 +535,9 @@ export async function connectStac(
     try {
       collections = await loadStacCollections(collectionsLink.href, fetcher, signal);
     } catch {
-      // Collection discovery is helpful but not required for item search.
+      // Collection discovery is helpful but not required for item search. A failed or malformed
+      // page no longer reaches here -- loadStacCollections stops the walk and returns what it
+      // gathered -- so this stays only as a backstop for anything it does not anticipate.
     }
   }
 
